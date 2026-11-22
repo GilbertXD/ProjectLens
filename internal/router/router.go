@@ -11,7 +11,16 @@ import (
 	"projectlens/internal/middleware"
 )
 
-func New(cfg config.Config, log *slog.Logger) *gin.Engine {
+type Dependencies struct {
+	Projects *handler.ProjectHandler
+	Pinger   handler.Pinger
+}
+
+func New(cfg config.Config, log *slog.Logger, optional ...Dependencies) *gin.Engine {
+	var deps Dependencies
+	if len(optional) != 0 {
+		deps = optional[0]
+	}
 	switch cfg.App.Env {
 	case "production":
 		gin.SetMode(gin.ReleaseMode)
@@ -26,8 +35,12 @@ func New(cfg config.Config, log *slog.Logger) *gin.Engine {
 	engine.RedirectTrailingSlash = false
 	engine.Use(middleware.RequestID(), middleware.Logger(log), middleware.Recovery(log), middleware.CORS(cfg.CORS))
 	engine.GET("/healthz", handler.HealthHandler(cfg.App))
+	engine.GET("/readyz", handler.ReadyHandler(deps.Pinger))
 
 	api := engine.Group("/api/v1")
+	if deps.Projects != nil {
+		deps.Projects.Register(api)
+	}
 	api.GET("/ping", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "pong"})
 	})

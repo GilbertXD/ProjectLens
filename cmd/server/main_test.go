@@ -31,3 +31,12 @@ func TestRunInvalidEnvironment(t *testing.T) {
 		t.Fatalf("stderr = %q, want integer port error", message)
 	}
 }
+
+func TestRunInvalidDatabaseConfiguration(t *testing.T) {
+	t.Setenv("APP_CONFIG_FILE", "../../configs/config.yaml")
+	t.Setenv("DATABASE_URL", "")
+	var stderr bytes.Buffer
+	if code := run(nil, io.Discard, &stderr); code != 1 || !strings.Contains(stderr.String(), "DATABASE_URL") {
+		t.Fatalf("exit = %d, stderr = %s, want database validation error", code, &stderr)
+	}
+}

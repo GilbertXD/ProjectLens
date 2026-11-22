@@ -17,5 +17,15 @@ log:
 
 cors:
   allowed_origins: []
-  allowed_methods: [GET, OPTIONS]
+  allowed_methods: [GET, POST, PUT, PATCH, DELETE, OPTIONS]
   allowed_headers: [Content-Type, X-Request-ID]
+
+database:
+  dsn: postgres://projectlens:projectlens@localhost:5432/projectlens?sslmode=disable
+  max_conns: 10
+  min_conns: 2
+  max_conn_lifetime: 30m
+  max_conn_idle_time: 5m
+  health_check_period: 1m
+  connect_timeout: 5s
+  auto_migrate: true

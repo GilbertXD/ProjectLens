@@ -20,3 +20,17 @@ docker-up:
 
 docker-down:
 	docker compose down
+
+.PHONY: migrate-up migrate-down migrate-status test-integration
+
+migrate-up:
+	go run ./cmd/migrate up
+
+migrate-down:
+	go run ./cmd/migrate down
+
+migrate-status:
+	go run ./cmd/migrate status
+
+test-integration:
+	go test -race -v ./internal/integration

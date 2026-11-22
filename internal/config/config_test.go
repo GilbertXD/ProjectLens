@@ -158,3 +158,35 @@ func TestLoadInvalidOverrides(t *testing.T) {
 		})
 	}
 }
+
+func TestDatabaseConfiguration(t *testing.T) {
+	path := writeConfig(t, "database:\n  max_conns: 12\n  connect_timeout: 8s\n")
+	yamlCfg, err := load(path, env(nil))
+	if err != nil || yamlCfg.Database.MaxConns != 12 || yamlCfg.Database.ConnectTimeout != 8*time.Second ||
+		yamlCfg.Database.MinConns != 2 || !yamlCfg.Database.AutoMigrate {
+		t.Fatalf("database YAML = %+v, error = %v", yamlCfg.Database, err)
+	}
+	env := map[string]string{
+		"DATABASE_URL": "postgres://db/test",
+		"DB_MIN_CONNS": "0", "DB_MAX_CONNS": "15",
+		"DB_MAX_CONN_LIFETIME": "40m", "DB_MAX_CONN_IDLE_TIME": "4m",
+		"DB_HEALTH_CHECK_PERIOD": "10s", "DB_CONNECT_TIMEOUT": "9s", "DB_AUTO_MIGRATE": "false",
+	}
+	lookup := func(key string) (string, bool) { value, ok := env[key]; return value, ok }
+	cfg, err := load(path, lookup)
+	want := DatabaseConfig{
+		DSN: env["DATABASE_URL"], MaxConns: 15, MinConns: 0, MaxConnLifetime: 40 * time.Minute,
+		MaxConnIdleTime: 4 * time.Minute, HealthCheckPeriod: 10 * time.Second, ConnectTimeout: 9 * time.Second,
+	}
+	if err != nil || cfg.Database != want {
+		t.Fatalf("database = %+v, error = %v, want %+v", cfg.Database, err, want)
+	}
+	for _, value := range []string{"1.5", `"2"`, "2147483648", "0"} {
+		if err := os.WriteFile(path, []byte("database:\n  max_conns: "+value+"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := load(path, func(string) (string, bool) { return "", false }); err == nil {
+			t.Errorf("expected max_conns %s to fail", value)
+		}
+	}
+}

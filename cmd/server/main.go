@@ -11,9 +11,13 @@ import (
 	"syscall"
 
 	"projectlens/internal/config"
+	"projectlens/internal/db"
+	"projectlens/internal/handler"
 	"projectlens/internal/logger"
+	"projectlens/internal/repository"
 	"projectlens/internal/router"
 	"projectlens/internal/server"
+	"projectlens/internal/service"
 )
 
 func main() {
@@ -52,7 +56,24 @@ func run(args []string, stdout, stderr io.Writer) int {
 	log := logger.New(cfg.Log, stdout)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := server.New(cfg, log, router.New(cfg, log)).Run(ctx); err != nil {
+	pool, err := db.NewPool(ctx, cfg.Database)
+	if err != nil {
+		fmt.Fprintf(stderr, "initialize database: %v\n", err)
+		return 1
+	}
+	defer pool.Close()
+	if cfg.Database.AutoMigrate {
+		if err := db.MigrateUp(ctx, pool); err != nil {
+			fmt.Fprintf(stderr, "migrate database: %v\n", err)
+			return 1
+		}
+	}
+	projects := service.NewProjectService(repository.NewPostgresProjectRepository(pool), db.NewPgxTxManager(pool))
+	routes := router.New(cfg, log, router.Dependencies{
+		Projects: handler.NewProjectHandler(projects, log),
+		Pinger:   pool,
+	})
+	if err := server.New(cfg, log, routes).Run(ctx); err != nil {
 		fmt.Fprintf(stderr, "run server: %v\n", err)
 		return 1
 	}

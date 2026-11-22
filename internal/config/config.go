@@ -13,10 +13,47 @@ import (
 )
 
 type Config struct {
-	App    AppConfig    `yaml:"app"`
-	Server ServerConfig `yaml:"server"`
-	Log    LogConfig    `yaml:"log"`
-	CORS   CORSConfig   `yaml:"cors"`
+	Database DatabaseConfig `yaml:"database"`
+	App      AppConfig      `yaml:"app"`
+	Server   ServerConfig   `yaml:"server"`
+	Log      LogConfig      `yaml:"log"`
+	CORS     CORSConfig     `yaml:"cors"`
+}
+
+type DatabaseConfig struct {
+	DSN               string        `yaml:"dsn"`
+	MaxConns          int32         `yaml:"max_conns"`
+	MinConns          int32         `yaml:"min_conns"`
+	MaxConnLifetime   time.Duration `yaml:"max_conn_lifetime"`
+	MaxConnIdleTime   time.Duration `yaml:"max_conn_idle_time"`
+	HealthCheckPeriod time.Duration `yaml:"health_check_period"`
+	ConnectTimeout    time.Duration `yaml:"connect_timeout"`
+	AutoMigrate       bool          `yaml:"auto_migrate"`
+}
+
+// Check integer node types before yaml.v3 can truncate floats.
+func (cfg *DatabaseConfig) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: database must be a mapping", node.Line)
+	}
+	for i := 0; i < len(node.Content); i += 2 {
+		key, value := node.Content[i], node.Content[i+1]
+		switch key.Value {
+		case "max_conns", "min_conns":
+			if value.Kind == yaml.AliasNode {
+				value = value.Alias
+			}
+			if value.ShortTag() != "!!int" {
+				return fmt.Errorf("line %d: database.%s must be an integer", value.Line, key.Value)
+			}
+
+		case "dsn", "max_conn_lifetime", "max_conn_idle_time", "health_check_period", "connect_timeout", "auto_migrate":
+		default:
+			return fmt.Errorf("line %d: unknown database field %q", key.Line, key.Value)
+		}
+	}
+	type plain DatabaseConfig
+	return node.Decode((*plain)(cfg))
 }
 
 type AppConfig struct {
@@ -62,6 +99,16 @@ type CORSConfig struct {
 
 func defaults() Config {
 	return Config{
+		Database: DatabaseConfig{
+			DSN:               "postgres://projectlens:projectlens@localhost:5432/projectlens?sslmode=disable",
+			MaxConns:          10,
+			MinConns:          2,
+			MaxConnLifetime:   30 * time.Minute,
+			MaxConnIdleTime:   5 * time.Minute,
+			HealthCheckPeriod: time.Minute,
+			ConnectTimeout:    5 * time.Second,
+			AutoMigrate:       true,
+		},
 		App: AppConfig{Name: "ProjectLens", Env: "development", Version: "0.1.0"},
 		Server: ServerConfig{
 			Host:            "0.0.0.0",
@@ -74,7 +121,7 @@ func defaults() Config {
 		Log: LogConfig{Level: "info", Format: "text"},
 		CORS: CORSConfig{
 			AllowedOrigins: []string{},
-			AllowedMethods: []string{"GET", "OPTIONS"},
+			AllowedMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 			AllowedHeaders: []string{"Content-Type", "X-Request-ID"},
 		},
 	}
@@ -133,6 +180,7 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		target *string
 	}{
 		{"APP_NAME", &cfg.App.Name},
+		{"DATABASE_URL", &cfg.Database.DSN},
 		{"APP_ENV", &cfg.App.Env},
 		{"APP_VERSION", &cfg.App.Version},
 		{"SERVER_HOST", &cfg.Server.Host},
@@ -144,6 +192,28 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		}
 	}
 
+	for _, field := range []struct {
+		name   string
+		target *int32
+	}{
+		{"DB_MAX_CONNS", &cfg.Database.MaxConns},
+		{"DB_MIN_CONNS", &cfg.Database.MinConns},
+	} {
+		if value, ok := lookupEnv(field.name); ok {
+			number, err := strconv.ParseInt(value, 10, 32)
+			if err != nil {
+				return fmt.Errorf("%s must be a 32-bit integer: %w", field.name, err)
+			}
+			*field.target = int32(number)
+		}
+	}
+	if value, ok := lookupEnv("DB_AUTO_MIGRATE"); ok {
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("DB_AUTO_MIGRATE must be a boolean: %w", err)
+		}
+		cfg.Database.AutoMigrate = enabled
+	}
 	if value, ok := lookupEnv("SERVER_PORT"); ok {
 		port, err := strconv.Atoi(value)
 		if err != nil {
@@ -156,6 +226,10 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		name   string
 		target *time.Duration
 	}{
+		{"DB_MAX_CONN_LIFETIME", &cfg.Database.MaxConnLifetime},
+		{"DB_MAX_CONN_IDLE_TIME", &cfg.Database.MaxConnIdleTime},
+		{"DB_HEALTH_CHECK_PERIOD", &cfg.Database.HealthCheckPeriod},
+		{"DB_CONNECT_TIMEOUT", &cfg.Database.ConnectTimeout},
 		{"SERVER_READ_TIMEOUT", &cfg.Server.ReadTimeout},
 		{"SERVER_WRITE_TIMEOUT", &cfg.Server.WriteTimeout},
 		{"SERVER_IDLE_TIMEOUT", &cfg.Server.IdleTimeout},
@@ -182,6 +256,15 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 }
 
 func (cfg Config) Validate() error {
+	if strings.TrimSpace(cfg.Database.DSN) == "" {
+		return errors.New("database.dsn (DATABASE_URL) must not be empty")
+	}
+	if cfg.Database.MaxConns < 1 {
+		return errors.New("database.max_conns (DB_MAX_CONNS) must be positive")
+	}
+	if cfg.Database.MinConns < 0 || cfg.Database.MinConns > cfg.Database.MaxConns {
+		return errors.New("database.min_conns (DB_MIN_CONNS) must be between zero and max_conns")
+	}
 	if strings.TrimSpace(cfg.App.Name) == "" {
 		return errors.New("app.name (APP_NAME) must not be empty")
 	}
@@ -197,6 +280,10 @@ func (cfg Config) Validate() error {
 		name  string
 		value time.Duration
 	}{
+		{"database.max_conn_lifetime (DB_MAX_CONN_LIFETIME)", cfg.Database.MaxConnLifetime},
+		{"database.max_conn_idle_time (DB_MAX_CONN_IDLE_TIME)", cfg.Database.MaxConnIdleTime},
+		{"database.health_check_period (DB_HEALTH_CHECK_PERIOD)", cfg.Database.HealthCheckPeriod},
+		{"database.connect_timeout (DB_CONNECT_TIMEOUT)", cfg.Database.ConnectTimeout},
 		{"server.read_timeout (SERVER_READ_TIMEOUT)", cfg.Server.ReadTimeout},
 		{"server.write_timeout (SERVER_WRITE_TIMEOUT)", cfg.Server.WriteTimeout},
 		{"server.idle_timeout (SERVER_IDLE_TIMEOUT)", cfg.Server.IdleTimeout},

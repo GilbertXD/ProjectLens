@@ -1,7 +1,9 @@
 package router
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -30,6 +32,7 @@ func TestRoutes(t *testing.T) {
 		status           int
 	}{
 		{"/healthz", "status", "ok", http.StatusOK},
+		{"/readyz", "status", "ok", http.StatusOK},
 		{"/api/v1/ping", "message", "pong", http.StatusOK},
 		{"/missing", "error", "not found", http.StatusNotFound},
 		{"/healthz/", "error", "not found", http.StatusNotFound},
@@ -56,5 +59,28 @@ func TestRoutes(t *testing.T) {
 				t.Fatalf("%s = %q, want %q", tc.key, body[tc.key], tc.value)
 			}
 		})
+	}
+}
+
+type readinessPinger struct{ err error }
+
+func (p readinessPinger) Ping(context.Context) error { return p.err }
+
+func TestReadinessWithDatabase(t *testing.T) {
+	cfg := config.Config{App: config.AppConfig{Env: "test"}}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	for _, tc := range []struct {
+		err    error
+		status int
+	}{
+		{nil, http.StatusOK},
+		{errors.New("private database error"), http.StatusServiceUnavailable},
+	} {
+		engine := New(cfg, log, Dependencies{Pinger: readinessPinger{err: tc.err}})
+		w := httptest.NewRecorder()
+		engine.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+		if w.Code != tc.status || strings.Contains(w.Body.String(), "private database error") {
+			t.Errorf("readiness = %d %s, want %d", w.Code, w.Body, tc.status)
+		}
 	}
 }
