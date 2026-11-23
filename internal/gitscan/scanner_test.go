@@ -273,3 +273,147 @@ func TestShallowCommitMetadata(t *testing.T) {
 		t.Fatalf("shallow metadata differs: full=%+v shallow=%+v err=%v", full, shallow, err)
 	}
 }
+
+func TestScannerConfigHash(t *testing.T) {
+	cfg := config.DefaultScannerConfig()
+	cfg.ExcludePatterns = []string{"z", "a"}
+	hash := localScanner(t.TempDir(), cfg).ConfigHash()
+	if !validOID(hash) || len(hash) != 64 {
+		t.Fatalf("invalid configuration hash: %q", hash)
+	}
+	for _, mutate := range []func(*config.ScannerConfig){
+		func(cfg *config.ScannerConfig) { cfg.MaxFileSize++ },
+		func(cfg *config.ScannerConfig) { cfg.MaxTotalBytes++ },
+		func(cfg *config.ScannerConfig) { cfg.MaxFiles++ },
+		func(cfg *config.ScannerConfig) { cfg.MaxPathLength++ },
+		func(cfg *config.ScannerConfig) { cfg.MaxPathDepth++ },
+		func(cfg *config.ScannerConfig) { cfg.ExcludePatterns = []string{"a", "b"} },
+	} {
+		changed := cfg
+		mutate(&changed)
+		if localScanner("", changed).ConfigHash() == hash {
+			t.Fatalf("changed filters produced the same hash: %+v", changed)
+		}
+	}
+	cfg.ExcludePatterns = []string{"a", "z"}
+	cfg.CacheDir, cfg.GitTimeout = t.TempDir(), time.Second
+	if got := localScanner("", cfg).ConfigHash(); got != hash {
+		t.Fatalf("pattern order or runtime settings changed hash: %q != %q", got, hash)
+	}
+}
+
+func baseFromScan(scan *IncrementalScanResult) *IncrementalBase {
+	base := &IncrementalBase{
+		ScannerConfigHash: scan.ScannerConfigHash, CommitHash: scan.Commit.Hash, TreeHash: scan.Commit.TreeHash,
+		Files: make(map[string]PreviousFile, len(scan.Files)),
+	}
+	for _, file := range scan.Files {
+		base.Files[file.Path] = PreviousFile{
+			Path: file.Path, BlobOID: file.BlobOID, Size: file.Size, Mode: file.Mode, SHA256: file.SHA256, LineCount: file.LineCount,
+		}
+	}
+	return base
+}
+
+func TestIncrementalUnchangedWithoutTree(t *testing.T) {
+	dir := newFixture(t)
+	writeFixture(t, dir, "a", "first", 0644)
+	fixtureGit(t, dir, "add", ".")
+	saveFixture(t, dir)
+	cfg := config.DefaultScannerConfig()
+	spec := SourceSpec{SourceType: domain.RepositorySourceLocalGit, Source: dir}
+	scanner := localScanner(dir, cfg)
+	first, err := scanner.ScanIncremental(t.Context(), spec, nil, ScanOptions{})
+	if err != nil || first.BlobsRead != 1 || first.AddedFiles != 1 {
+		t.Fatalf("initial scan: %+v, %v", first, err)
+	}
+	// Reject tree and blob reads while keeping commit resolution available.
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shim := t.TempDir()
+	writeFixture(t, shim, "git", `#!/bin/sh
+for arg do
+	case "$arg" in ls-tree|--batch) exit 97 ;; esac
+done
+exec "$PROJECTLENS_TEST_GIT" "$@"
+`, 0755)
+	t.Setenv("PROJECTLENS_TEST_GIT", git)
+	t.Setenv("PATH", shim+string(os.PathListSeparator)+os.Getenv("PATH"))
+	base := baseFromScan(first)
+	same, err := scanner.ScanIncremental(t.Context(), spec, base, ScanOptions{})
+	if err != nil || !same.Unchanged || same.BlobsRead != 0 || same.UnchangedFiles != 1 {
+		t.Fatalf("unchanged scan: %+v, %v", same, err)
+	}
+	cfg.MaxFiles--
+	if _, err := localScanner(dir, cfg).ScanIncremental(t.Context(), spec, base, ScanOptions{}); err == nil {
+		t.Fatal("changed config did not require the tree")
+	}
+}
+
+func TestIncrementalReadAndReuse(t *testing.T) {
+	dir := newFixture(t)
+	for name, content := range map[string]string{
+		"mode": "mode\n", "old": "rename\nme", "deleted": "gone", "modified": "before", "unchanged": "as was",
+		"duplicate": "rename\nme", "replaced": "will have a different existing blob",
+	} {
+		writeFixture(t, dir, name, content, 0644)
+	}
+	fixtureGit(t, dir, "add", ".")
+	firstOID := saveFixture(t, dir)
+	cfg := config.DefaultScannerConfig()
+	spec := SourceSpec{SourceType: domain.RepositorySourceLocalGit, Source: dir}
+	scanner := localScanner(dir, cfg)
+	options := ScanOptions{IncludeContent: true}
+	first, err := scanner.ScanIncremental(t.Context(), spec, nil, options)
+	if err != nil || first.BlobsRead != 7 {
+		t.Fatalf("initial scan: %+v, %v", first, err)
+	}
+	fixtureGit(t, dir, "mv", "old", "renamed")
+	fixtureGit(t, dir, "rm", "deleted")
+	writeFixture(t, dir, "modified", "after", 0644)
+	writeFixture(t, dir, "added", "new content", 0644)
+	writeFixture(t, dir, "replaced", "rename\nme", 0644)
+	writeFixture(t, dir, "nul", strings.Repeat("a", 9000)+"\x00", 0644)
+	writeFixture(t, dir, "invalid", strings.Repeat("a", 9000)+"\xff", 0644)
+	fixtureGit(t, dir, "add", ".")
+	fixtureGit(t, dir, "update-index", "--chmod=+x", "mode")
+	saveFixture(t, dir, firstOID)
+	base := baseFromScan(first)
+	got, err := scanner.ScanIncremental(t.Context(), spec, base, options)
+	if err != nil || got.Unchanged || got.AddedFiles != 2 || got.ModifiedFiles != 3 || got.DeletedFiles != 2 ||
+		got.UnchangedFiles != 2 || got.BlobsRead != 4 || got.Stats.SkippedByReason[string(SkipBinaryFile)] != 2 ||
+		!reflect.DeepEqual(got.DeletedPaths, []string{"deleted", "old"}) {
+		t.Fatalf("incremental scan: %+v, %v", got, err)
+	}
+	for _, file := range got.Files {
+		switch file.Path {
+		case "renamed", "replaced":
+			prior := base.Files["duplicate"]
+			if !file.Reused || file.ReusedFromPath != prior.Path || file.SHA256 != prior.SHA256 || file.LineCount != 2 || file.Content != nil {
+				t.Errorf("cross-path reuse: %+v", file)
+			}
+		case "mode", "duplicate", "unchanged":
+			if !file.Reused || file.ReusedFromPath != file.Path || file.Content != nil || file.IsExecutable != (file.Path == "mode") {
+				t.Errorf("same-path reuse: %+v", file)
+			}
+		case "modified":
+			if file.Reused || string(file.Content) != "after" {
+				t.Errorf("new content: %+v", file)
+			}
+		case "added":
+			if file.Reused || string(file.Content) != "new content" {
+				t.Errorf("added content: %+v", file)
+			}
+		default:
+			t.Errorf("unexpected included file: %+v", file)
+		}
+	}
+	cfg.ExcludePatterns = []string{"added"}
+	reconfigured, err := localScanner(dir, cfg).ScanIncremental(t.Context(), spec, baseFromScan(got), options)
+	if err != nil || reconfigured.Unchanged || reconfigured.ScannerConfigHash == got.ScannerConfigHash ||
+		reconfigured.BlobsRead != 2 || !reflect.DeepEqual(reconfigured.DeletedPaths, []string{"added"}) {
+		t.Fatalf("config rescan: %+v, %v", reconfigured, err)
+	}
+}

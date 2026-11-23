@@ -61,3 +61,7 @@ scanner:
   max_path_length: 512
   max_path_depth: 32
   exclude_patterns: []
+
+sync:
+  retain_superseded: 2
+  failed_retention: 24h

@@ -87,11 +87,23 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "register repository scan handler: %v\n", err)
 		return 1
 	}
+	snapshotStore, err := repository.NewPostgresSnapshotStore(ctx, pool)
+	if err != nil {
+		fmt.Fprintf(stderr, "initialize snapshot store: %v\n", err)
+		return 1
+	}
+	defer snapshotStore.Close()
+	syncer := service.NewSyncService(repositoryStore, snapshotStore, db.NewPgxTxManager(pool), scanner, cfg.Sync, log)
+	if err := worker.RegisterSyncHandler(registry, syncer); err != nil {
+		fmt.Fprintf(stderr, "register repository sync handler: %v\n", err)
+		return 1
+	}
 	jobStore := repository.NewPostgresJobStore(pool)
 	jobs := service.NewJobService(jobStore, registry, cfg.Worker)
 	routes := router.New(cfg, log, router.Dependencies{
 		Projects:     handler.NewProjectHandler(projects, log),
 		Repositories: handler.NewRepositoryHandler(repositories, log),
+		Snapshots:    handler.NewSnapshotHandler(syncer, log),
 		Pinger:       pool,
 		Jobs:         handler.NewJobHandler(jobs, log),
 	})

@@ -91,11 +91,15 @@ func TestRepositoryRoutes(t *testing.T) {
 	engine := New(config.Config{App: config.AppConfig{Env: "test"}}, log, Dependencies{
 		Projects:     handler.NewProjectHandler(nil, log),
 		Repositories: handler.NewRepositoryHandler(nil, log),
+		Snapshots:    handler.NewSnapshotHandler(nil, log),
 	})
 	base := "/api/v1/projects/:id/repositories"
+	scoped := base + "/:repoId"
 	want := map[string]bool{
 		"POST " + base: true, "GET " + base: true, "GET " + base + "/:repoId": true,
-		"PATCH " + base + "/:repoId": true, "POST " + base + "/:repoId/sync": true, "DELETE " + base + "/:repoId": true,
+		"PATCH " + scoped: true, "POST " + scoped + "/sync": true, "DELETE " + scoped: true,
+		"GET " + scoped + "/snapshots": true, "GET " + scoped + "/snapshots/active": true,
+		"GET " + scoped + "/files": true, "GET " + scoped + "/files/content": true,
 	}
 	for _, route := range engine.Routes() {
 		delete(want, route.Method+" "+route.Path)

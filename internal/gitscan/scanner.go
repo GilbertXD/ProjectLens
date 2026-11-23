@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"projectlens/internal/config"
 	"projectlens/internal/domain"
@@ -117,6 +119,12 @@ func (s *Scanner) Scan(ctx context.Context, spec SourceSpec, options ScanOptions
 }
 
 func (s *Snapshot) include(entry treeEntry, content []byte, options ScanOptions) {
+	s.Files = append(s.Files, describeFile(entry, content, options))
+	s.Stats.IncludedFiles++
+	s.Stats.IncludedBytes += entry.Size
+}
+
+func describeFile(entry treeEntry, content []byte, options ScanOptions) FileEntry {
 	lines := bytes.Count(content, []byte{'\n'})
 	if len(content) > 0 && content[len(content)-1] != '\n' {
 		lines++
@@ -128,23 +136,25 @@ func (s *Snapshot) include(entry treeEntry, content []byte, options ScanOptions)
 	if options.IncludeContent {
 		file.Content = content
 	}
-	s.Files = append(s.Files, file)
-	s.Stats.IncludedFiles++
-	s.Stats.IncludedBytes += entry.Size
+	return file
 }
 
 func (s *Snapshot) skip(entry treeEntry, reason SkipReason) {
-	s.Stats.SkippedFiles++
-	s.Stats.SkippedByReason[string(reason)]++
+	recordSkip(&s.Stats, &s.Skipped, entry, reason)
+}
+
+func recordSkip(stats *SnapshotStats, skipped *[]SkippedFile, entry treeEntry, reason SkipReason) {
+	stats.SkippedFiles++
+	stats.SkippedByReason[string(reason)]++
 	if reason == SkipMaxFilesExceeded || reason == SkipTotalBytesExceeded {
-		s.Stats.Truncated = true
+		stats.Truncated = true
 	}
-	if len(s.Skipped) == skippedLimit {
-		s.Stats.SkippedListTruncated = true
+	if len(*skipped) == skippedLimit {
+		stats.SkippedListTruncated = true
 		return
 	}
 	entry.Reason = reason
-	s.Skipped = append(s.Skipped, entry.SkippedFile)
+	*skipped = append(*skipped, entry.SkippedFile)
 }
 
 // ReadBlob reads an object referenced by a regular file in the requested commit.
@@ -389,4 +399,162 @@ func (b *blobBatch) abort() {
 		_ = b.in.Close()
 		_ = b.cmd.Wait()
 	}
+}
+
+// ConfigHash identifies the filters and inclusion budgets used to build a snapshot.
+func (s *Scanner) ConfigHash() string {
+	patterns := append([]string{}, s.cfg.ExcludePatterns...)
+	slices.Sort(patterns)
+	fields := struct {
+		MaxFileSize     int64
+		MaxTotalBytes   int64
+		MaxFiles        int
+		MaxPathLength   int
+		MaxPathDepth    int
+		ExcludePatterns []string
+	}{
+		s.cfg.MaxFileSize, s.cfg.MaxTotalBytes, s.cfg.MaxFiles, s.cfg.MaxPathLength, s.cfg.MaxPathDepth, patterns,
+	}
+	// All fields have JSON representations that cannot fail to marshal.
+	encoded, _ := json.Marshal(fields)
+	return fmt.Sprintf("%x", sha256.Sum256(encoded))
+}
+
+func (s *Scanner) ScanIncremental(ctx context.Context, spec SourceSpec, base *IncrementalBase, options ScanOptions) (*IncrementalScanResult, error) {
+	if err := s.cfg.Validate(); err != nil {
+		return nil, err
+	}
+	if !utf8.ValidString(spec.Ref) || utf8.RuneCountInString(spec.Ref) > 255 {
+		return nil, fmt.Errorf("%w: Git ref must be valid UTF-8 and at most 255 characters", domain.ErrInvalidInput)
+	}
+	ctx, cancel := context.WithTimeout(ctx, s.cfg.GitTimeout)
+	defer cancel()
+	repo, err := s.prepare(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	defer repo.Release()
+	commit, err := readCommit(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
+	result := &IncrementalScanResult{
+		ResolvedRef: repo.ResolvedRef, Commit: commit, ScannerConfigHash: s.ConfigHash(),
+		ScannedAt: time.Now().UTC(),
+	}
+	if base != nil && base.ScannerConfigHash == result.ScannerConfigHash &&
+		base.CommitHash == commit.Hash && base.TreeHash == commit.TreeHash {
+		result.Unchanged = true
+		result.UnchangedFiles = len(base.Files)
+		return result, ctx.Err()
+	}
+
+	entries, err := readTree(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
+	result.Stats = SnapshotStats{TotalTreeEntries: len(entries), SkippedByReason: make(map[string]int)}
+	result.Files = []IncrementalFile{}
+	result.Skipped = []SkippedFile{}
+	result.DeletedPaths = []string{}
+
+	var previous map[string]PreviousFile
+	if base != nil {
+		previous = base.Files
+	}
+	type blobKey struct {
+		oid  string
+		size int64
+	}
+	byBlob := make(map[blobKey]string, len(previous))
+	for name, file := range previous {
+		key := blobKey{file.BlobOID, file.Size}
+		if current, ok := byBlob[key]; !ok || name < current {
+			byBlob[key] = name
+		}
+	}
+	included := make(map[string]struct{}, len(previous))
+	var batch *blobBatch
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		reason := filterEntry(entry, s.cfg)
+		switch {
+		case reason != "":
+		case utf8.RuneCountInString(entry.Path) > 512:
+			reason = SkipPathLimitExceeded
+		case len(result.Files) >= s.cfg.MaxFiles:
+			reason = SkipMaxFilesExceeded
+		case entry.Size > s.cfg.MaxTotalBytes-result.Stats.IncludedBytes:
+			reason = SkipTotalBytesExceeded
+		}
+		if reason != "" {
+			recordSkip(&result.Stats, &result.Skipped, entry, reason)
+			continue
+		}
+
+		old, existed := previous[entry.Path]
+		sameBlob := existed && old.BlobOID == entry.BlobOID && old.Size == entry.Size
+		sourcePath, reused := byBlob[blobKey{entry.BlobOID, entry.Size}]
+		if sameBlob {
+			sourcePath = entry.Path
+		}
+		file := IncrementalFile{Reused: reused, ReusedFromPath: sourcePath}
+		if reused {
+			source := previous[sourcePath]
+			file.FileEntry = FileEntry{
+				Path: entry.Path, BlobOID: entry.BlobOID, Mode: entry.Mode, Size: entry.Size,
+				SHA256: source.SHA256, LineCount: source.LineCount, IsExecutable: entry.Mode == "100755",
+			}
+		} else {
+			if batch == nil {
+				batch, err = startBlobBatch(ctx, repo.GitDir)
+				if err != nil {
+					return nil, err
+				}
+				defer batch.abort()
+			}
+			result.BlobsRead++
+			content, err := batch.read(entry.BlobOID, entry.Size, s.cfg.MaxFileSize)
+			switch {
+			case ctx.Err() != nil:
+				return nil, ctx.Err()
+			case errors.Is(err, errBlobUnavailable):
+				recordSkip(&result.Stats, &result.Skipped, entry, SkipBlobReadError)
+				continue
+			case err != nil:
+				return nil, err
+			case isBinary(content):
+				recordSkip(&result.Stats, &result.Skipped, entry, SkipBinaryFile)
+				continue
+			}
+			file.FileEntry = describeFile(entry, content, options)
+		}
+		result.Files = append(result.Files, file)
+		result.Stats.IncludedFiles++
+		result.Stats.IncludedBytes += entry.Size
+		included[entry.Path] = struct{}{}
+		switch {
+		case !existed:
+			result.AddedFiles++
+		case sameBlob && old.Mode == entry.Mode:
+			result.UnchangedFiles++
+		default:
+			result.ModifiedFiles++
+		}
+	}
+	if batch != nil {
+		if err := batch.finish(ctx); err != nil {
+			return nil, err
+		}
+	}
+	for name := range previous {
+		if _, ok := included[name]; !ok {
+			result.DeletedPaths = append(result.DeletedPaths, name)
+		}
+	}
+	slices.Sort(result.DeletedPaths)
+	result.DeletedFiles = len(result.DeletedPaths)
+	return result, ctx.Err()
 }

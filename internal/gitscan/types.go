@@ -94,3 +94,42 @@ type Snapshot struct {
 type ScanOptions struct {
 	IncludeContent bool
 }
+
+type PreviousFile struct {
+	Path      string
+	BlobOID   string
+	Mode      string
+	Size      int64
+	SHA256    string
+	LineCount int
+}
+
+type IncrementalBase struct {
+	ScannerConfigHash string
+	CommitHash        string
+	TreeHash          string
+	Files             map[string]PreviousFile
+}
+
+type IncrementalFile struct {
+	FileEntry
+	Reused         bool
+	ReusedFromPath string
+}
+
+type IncrementalScanResult struct {
+	ResolvedRef       string
+	Commit            CommitInfo
+	ScannerConfigHash string
+	ScannedAt         time.Time
+	Stats             SnapshotStats
+	Files             []IncrementalFile
+	Skipped           []SkippedFile
+	DeletedPaths      []string
+	Unchanged         bool
+	AddedFiles        int
+	ModifiedFiles     int
+	DeletedFiles      int
+	UnchangedFiles    int
+	BlobsRead         int
+}

@@ -74,17 +74,5 @@ func filterEntry(entry treeEntry, cfg config.ScannerConfig) SkipReason {
 }
 
 func isBinary(data []byte) bool {
-	const sniffBytes = 8192
-	prefix := data[:min(len(data), sniffBytes)]
-	if bytes.IndexByte(prefix, 0) >= 0 {
-		return true
-	}
-	for offset := 0; offset < len(prefix); {
-		r, width := utf8.DecodeRune(data[offset:])
-		if r == utf8.RuneError && width == 1 {
-			return true
-		}
-		offset += width
-	}
-	return false
+	return bytes.IndexByte(data, 0) >= 0 || !utf8.Valid(data)
 }

@@ -91,7 +91,46 @@ func (cfg ScannerConfig) Validate() error {
 	return nil
 }
 
+type SyncConfig struct {
+	RetainSuperseded int           `yaml:"retain_superseded"`
+	FailedRetention  time.Duration `yaml:"failed_retention"`
+}
+
+func (cfg *SyncConfig) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: sync must be a mapping", node.Line)
+	}
+	for i := 0; i < len(node.Content); i += 2 {
+		key, value := node.Content[i], node.Content[i+1]
+		switch key.Value {
+		case "retain_superseded":
+			if value.Kind == yaml.AliasNode {
+				value = value.Alias
+			}
+			if value.ShortTag() != "!!int" {
+				return fmt.Errorf("line %d: sync.retain_superseded must be an integer", value.Line)
+			}
+		case "failed_retention":
+		default:
+			return fmt.Errorf("line %d: unknown sync field %q", key.Line, key.Value)
+		}
+	}
+	type plain SyncConfig
+	return node.Decode((*plain)(cfg))
+}
+
+func (cfg SyncConfig) Validate() error {
+	if cfg.RetainSuperseded < 0 {
+		return errors.New("sync.retain_superseded (SYNC_RETAIN_SUPERSEDED) must be nonnegative")
+	}
+	if cfg.FailedRetention <= 0 {
+		return errors.New("sync.failed_retention (SYNC_FAILED_RETENTION) must be positive")
+	}
+	return nil
+}
+
 type Config struct {
+	Sync       SyncConfig       `yaml:"sync"`
 	Scanner    ScannerConfig    `yaml:"scanner"`
 	Worker     WorkerConfig     `yaml:"worker"`
 	Repository RepositoryConfig `yaml:"repository"`
@@ -220,6 +259,7 @@ type CORSConfig struct {
 func defaults() Config {
 	return Config{
 		Scanner: DefaultScannerConfig(),
+		Sync:    SyncConfig{RetainSuperseded: 2, FailedRetention: 24 * time.Hour},
 		Worker: WorkerConfig{
 			Mode:               "embedded",
 			Concurrency:        4,
@@ -352,6 +392,7 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		name   string
 		target *int
 	}{
+		{"SYNC_RETAIN_SUPERSEDED", &cfg.Sync.RetainSuperseded},
 		{"SCANNER_MAX_FILES", &cfg.Scanner.MaxFiles},
 		{"SCANNER_MAX_PATH_LENGTH", &cfg.Scanner.MaxPathLength},
 		{"SCANNER_MAX_PATH_DEPTH", &cfg.Scanner.MaxPathDepth},
@@ -385,6 +426,7 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		name   string
 		target *time.Duration
 	}{
+		{"SYNC_FAILED_RETENTION", &cfg.Sync.FailedRetention},
 		{"SCANNER_GIT_TIMEOUT", &cfg.Scanner.GitTimeout},
 		{"WORKER_POLL_INTERVAL", &cfg.Worker.PollInterval},
 		{"WORKER_LEASE_DURATION", &cfg.Worker.LeaseDuration},
@@ -456,6 +498,9 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 }
 
 func (cfg Config) Validate() error {
+	if err := cfg.Sync.Validate(); err != nil {
+		return err
+	}
 	if err := cfg.Scanner.Validate(); err != nil {
 		return err
 	}

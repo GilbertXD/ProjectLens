@@ -15,6 +15,7 @@ type Dependencies struct {
 	Jobs         *handler.JobHandler
 	Projects     *handler.ProjectHandler
 	Repositories *handler.RepositoryHandler
+	Snapshots    *handler.SnapshotHandler
 	Pinger       handler.Pinger
 }
 
@@ -45,6 +46,9 @@ func New(cfg config.Config, log *slog.Logger, optional ...Dependencies) *gin.Eng
 	}
 	if deps.Repositories != nil {
 		deps.Repositories.Register(api)
+	}
+	if deps.Snapshots != nil {
+		deps.Snapshots.Register(api)
 	}
 	if deps.Jobs != nil {
 		deps.Jobs.Register(api)

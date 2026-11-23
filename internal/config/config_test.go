@@ -359,3 +359,34 @@ func TestScannerRejectsInvalidExcludePatterns(t *testing.T) {
 		}
 	}
 }
+
+func TestSyncConfig(t *testing.T) {
+	cfg, err := load("", env(nil))
+	if err != nil || cfg.Sync != (SyncConfig{RetainSuperseded: 2, FailedRetention: 24 * time.Hour}) {
+		t.Fatalf("default sync config: %+v, %v", cfg.Sync, err)
+	}
+	path := writeConfig(t, "sync: {retain_superseded: 5, failed_retention: 3h}\n")
+	cfg, err = load(path, env(nil))
+	if err != nil || cfg.Sync != (SyncConfig{RetainSuperseded: 5, FailedRetention: 3 * time.Hour}) {
+		t.Fatalf("YAML sync config: %+v, %v", cfg.Sync, err)
+	}
+	cfg, err = load(path, env(map[string]string{"SYNC_RETAIN_SUPERSEDED": "0", "SYNC_FAILED_RETENTION": "1h"}))
+	if err != nil || cfg.Sync != (SyncConfig{RetainSuperseded: 0, FailedRetention: time.Hour}) {
+		t.Fatalf("environment sync config: %+v, %v", cfg.Sync, err)
+	}
+	for _, input := range []string{
+		"sync: {retain_superseded: 1.5}", "sync: {retain_superseded: '1'}", "sync: {retain_superseded: -1}",
+		"sync: {retain_superseded: null}", "sync: {failed_retention: 0s}", "sync: {typo: 2}",
+	} {
+		t.Run(input, func(t *testing.T) {
+			if _, err := load(writeConfig(t, input), env(nil)); err == nil {
+				t.Fatal("accepted invalid sync YAML")
+			}
+		})
+	}
+	for name, value := range map[string]string{"SYNC_RETAIN_SUPERSEDED": "2.5", "SYNC_FAILED_RETENTION": "-1h"} {
+		if _, err := load("", env(map[string]string{name: value})); err == nil || !strings.Contains(err.Error(), name) {
+			t.Errorf("invalid %s produced %v", name, err)
+		}
+	}
+}

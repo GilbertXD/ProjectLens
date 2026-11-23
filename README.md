@@ -37,7 +37,7 @@ docker compose config -q
 
 The server requires PostgreSQL. For a Go process on the host, provision a database matching `DATABASE_URL` in `.env.example` or export a DSN for an existing database. Compose starts its own PostgreSQL instance and stores data in the named `postgres_data` volume. `GET /readyz` reports database connectivity, and `GET /healthz` continues to report process health.
 
-The server applies embedded migrations on startup by default. Set `DB_AUTO_MIGRATE=false` if you apply migrations separately using `make migrate-up`. Use `make migrate-status` to inspect migration state. `make migrate-down` rolls back one migration at a time. From the latest version, the first rollback drops the repositories table and the second drops the project and audit tables.
+The server applies embedded migrations on startup by default. Set `DB_AUTO_MIGRATE=false` if you apply migrations separately using `make migrate-up`. Use `make migrate-status` to inspect migration state. `make migrate-down` rolls back one migration at a time. From the latest version, rollbacks drop source files and snapshots first, then jobs, then repositories, and finally projects and project audit logs.
 
 | Method | Path | Result |
 | --- | --- | --- |
@@ -161,3 +161,41 @@ Public GitHub scans fetch into a bare cache owned by the worker. `GITHUB_TOKEN` 
 Custom exclusions add to the built-in exclusions for paths such as `node_modules`, `vendor`, and `dist`. Specify comma-separated Go path globs in the environment. A pattern without a slash matches individual path components. A pattern with a slash matches paths relative to the repository root, including parent directories.
 
 Set `TEST_SCAN_LOCAL_REPO` and `TEST_SCAN_REMOTE_REPO` to exercise the live scanner smoke tests with `go test -run '^TestLive' ./internal/gitscan`.
+
+### Publish a repository snapshot
+
+Queue a `repository.sync` job for an associated repository to publish its scanned source files and commit metadata to PostgreSQL.
+
+```sh
+curl -X POST http://localhost:8080/api/v1/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"repository.sync","payload":{"project_id":"<project UUID>","repository_id":"<repository UUID>","ref":"main"}}'
+```
+
+Omit `ref` to sync `HEAD`. The job uses the same Git sources and filters as `repository.scan`. The job result includes `status`, `snapshot_id`, `version`, commit and tree hashes, file change counts, `blobs_read`, and `pruned_snapshots`. A matching commit, tree, and filter configuration returns `unchanged` with zero blob reads and the existing snapshot ID. A changed scan returns `published` with a new version. Git reads new blobs and PostgreSQL copies content for files whose blobs already appear in the parent snapshot. The previous version serves reads until the new version commits.
+
+Query snapshots and active files under `/api/v1/projects/:id/repositories/:repoId`.
+
+| Method and path | Result |
+| --- | --- |
+| `GET /snapshots` | Snapshot history, newest version first. Accepts `limit` and `offset`. |
+| `GET /snapshots/active` | The active snapshot's metadata. Returns `404` before the first publish. |
+| `GET /files` | Active file metadata ordered by path. `q` matches a case-insensitive literal substring in the path or content. `path_prefix` matches the literal start of the path. Accepts `limit` and `offset`. |
+| `GET /files/content?path=src%2Fmain.go` | Metadata and text content for an exact active file path. Returns `404` for missing files. |
+
+Paginated responses include `items`, `total`, `limit`, and `offset`. The default limit is 20, the maximum is 100, and the default offset is 0. File search returns an empty page for a repository awaiting its first snapshot.
+
+| YAML key under `sync` | Environment variable | Default |
+| --- | --- | --- |
+| `retain_superseded` | `SYNC_RETAIN_SUPERSEDED` | `2` superseded versions per repository. Use `0` to keep only the active published version. |
+| `failed_retention` | `SYNC_FAILED_RETENTION` | `24h` for failed and stale staging snapshots. |
+
+Successful syncs, including unchanged runs, apply retention. Pruning a snapshot deletes its associated files. Repository sync locks use a separate pool with up to `DB_MAX_CONNS` sessions per process so locking can proceed alongside publishes and API reads.
+
+With `TEST_DATABASE_URL` set, live snapshot sync smoke tests use the same source variables as the live scanner tests. For example:
+
+```sh
+TEST_SCAN_LOCAL_REPO=/Users/hiya/HyAgent \
+TEST_SCAN_REMOTE_REPO=https://github.com/GilbertXD/HyMail.git \
+  go test -race -v -run '^TestLiveSnapshotSync$' ./internal/integration
+```

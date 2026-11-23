@@ -15,6 +15,7 @@ import (
 	"projectlens/internal/gitscan"
 	"projectlens/internal/logger"
 	"projectlens/internal/repository"
+	"projectlens/internal/service"
 	"projectlens/internal/worker"
 )
 
@@ -75,6 +76,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 	scanner := gitscan.NewScanner(cfg.Scanner, cfg.Repository, cfg.GitHub)
 	if err := worker.RegisterScanHandler(registry, repositoryStore, scanner); err != nil {
 		fmt.Fprintf(stderr, "register repository scan handler: %v\n", err)
+		return 1
+	}
+	snapshotStore, err := repository.NewPostgresSnapshotStore(ctx, pool)
+	if err != nil {
+		fmt.Fprintf(stderr, "initialize snapshot store: %v\n", err)
+		return 1
+	}
+	defer snapshotStore.Close()
+	syncer := service.NewSyncService(repositoryStore, snapshotStore, db.NewPgxTxManager(pool), scanner, cfg.Sync, log)
+	if err := worker.RegisterSyncHandler(registry, syncer); err != nil {
+		fmt.Fprintf(stderr, "register repository sync handler: %v\n", err)
 		return 1
 	}
 	worker.NewRunner(repository.NewPostgresJobStore(pool), registry, cfg.Worker, log).Run(ctx)
