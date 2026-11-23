@@ -37,7 +37,8 @@ func database(t *testing.T) config.Config {
 	}
 
 	cfg := config.Config{
-		App: config.AppConfig{Env: "test"},
+		App:    config.AppConfig{Env: "test"},
+		Search: config.DefaultSearchConfig(),
 		Database: config.DatabaseConfig{
 			DSN: dsn, MaxConns: 5, MinConns: 0, MaxConnLifetime: 30 * time.Minute,
 			MaxConnIdleTime: 5 * time.Minute, HealthCheckPeriod: time.Minute, ConnectTimeout: 5 * time.Second,
@@ -82,14 +83,20 @@ func openPool(t *testing.T, cfg config.Config) *pgxpool.Pool {
 	return pool
 }
 
-func startHTTP(cfg config.Config, pool *pgxpool.Pool) *httptest.Server {
+func startHTTP(cfg config.Config, pool *pgxpool.Pool, optionalCache ...service.SearchCache) *httptest.Server {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	store := repository.NewPostgresProjectRepository(pool)
 	svc := service.NewProjectService(store, db.NewPgxTxManager(pool))
 	repos := service.NewRepositoryService(store, repository.NewPostgresRepositoryStore(pool),
 		gitrepo.NewLocalInspector(cfg.Repository.AllowedLocalRoots), github.NewClient(cfg.GitHub, nil))
 	documents := service.NewDocumentService(store, repository.NewPostgresDocumentStore(pool), cfg.Document.MaxContentBytes)
+	var searchCache service.SearchCache
+	if len(optionalCache) > 0 {
+		searchCache = optionalCache[0]
+	}
+	search := service.NewSearchService(repository.NewPostgresSearchStore(pool), searchCache, cfg.Search, cfg.Redis.KeyPrefix, log)
 	return httptest.NewServer(router.New(cfg, log, router.Dependencies{
+		Search:    handler.NewSearchHandler(search, log),
 		Documents: handler.NewDocumentHandler(documents, log, cfg.Document.MaxContentBytes),
 		Projects:  handler.NewProjectHandler(svc, log), Repositories: handler.NewRepositoryHandler(repos, log), Pinger: pool,
 	}))
@@ -132,6 +139,25 @@ func TestProjectLifecycle(t *testing.T) {
 	}
 	if err := db.MigrateUp(ctx, pool); err != nil {
 		t.Fatal(err)
+	}
+	if err := db.MigrateDown(ctx, pool); err != nil {
+		t.Fatalf("migrate unified search down: %v", err)
+	}
+	var searchRemoved bool
+	if err := pool.QueryRow(ctx, `SELECT
+ to_regclass('documents') IS NOT NULL AND to_regclass('source_files') IS NOT NULL AND
+ to_regclass('snapshots') IS NOT NULL AND to_regclass('jobs') IS NOT NULL AND
+ to_regclass('repositories') IS NOT NULL AND to_regclass('projects') IS NOT NULL AND
+ to_regclass('project_audit_logs') IS NOT NULL AND
+ to_regclass('idx_source_files_search_vector') IS NULL AND to_regclass('idx_documents_search_vector') IS NULL AND
+ to_regprocedure('bump_repository_search_version()') IS NULL AND to_regprocedure('bump_snapshot_search_version()') IS NULL AND
+ to_regprocedure('bump_document_search_version()') IS NULL AND
+ NOT EXISTS (SELECT FROM information_schema.columns WHERE table_schema = current_schema()
+     AND ((table_name IN ('documents', 'source_files') AND column_name = 'search_vector')
+          OR (table_name = 'projects' AND column_name = 'search_version'))) AND
+ NOT EXISTS (SELECT FROM information_schema.triggers WHERE trigger_schema = current_schema()
+     AND trigger_name IN ('documents_search_version', 'repositories_search_version', 'snapshots_search_version'))`).Scan(&searchRemoved); err != nil || !searchRemoved {
+		t.Fatalf("unified search migration down did not preserve prior tables: removed=%t, error=%v", searchRemoved, err)
 	}
 	if err := db.MigrateDown(ctx, pool); err != nil {
 		t.Fatalf("migrate documents down: %v", err)

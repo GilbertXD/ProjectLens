@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"projectlens/internal/cache"
 	"projectlens/internal/config"
 	"projectlens/internal/db"
 	"projectlens/internal/github"
@@ -101,11 +102,24 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	jobStore := repository.NewPostgresJobStore(pool)
 	jobs := service.NewJobService(jobStore, registry, cfg.Worker)
+	var searchCache service.SearchCache
+	if cfg.Redis.Enabled {
+		redisCache := cache.NewRedisSearchCache(cfg.Redis)
+		defer redisCache.Close()
+		probeCtx, cancel := context.WithTimeout(ctx, cfg.Redis.DialTimeout)
+		if err := redisCache.Ping(probeCtx); err != nil {
+			log.WarnContext(ctx, "Redis search cache unavailable at startup", "error", err)
+		}
+		cancel()
+		searchCache = redisCache
+	}
+	search := service.NewSearchService(repository.NewPostgresSearchStore(pool), searchCache, cfg.Search, cfg.Redis.KeyPrefix, log)
 	routes := router.New(cfg, log, router.Dependencies{
 		Projects:     handler.NewProjectHandler(projects, log),
 		Documents:    handler.NewDocumentHandler(documents, log, cfg.Document.MaxContentBytes),
 		Repositories: handler.NewRepositoryHandler(repositories, log),
 		Snapshots:    handler.NewSnapshotHandler(syncer, log),
+		Search:       handler.NewSearchHandler(search, log),
 		Pinger:       pool,
 		Jobs:         handler.NewJobHandler(jobs, log),
 	})

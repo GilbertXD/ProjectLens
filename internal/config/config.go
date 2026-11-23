@@ -4,10 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -158,7 +160,93 @@ func (cfg *DocumentConfig) UnmarshalYAML(node *yaml.Node) error {
 	return node.Decode((*plain)(cfg))
 }
 
+type RedisConfig struct {
+	Enabled      bool          `yaml:"enabled"`
+	Addr         string        `yaml:"addr"`
+	Password     string        `yaml:"password"`
+	DB           int           `yaml:"db"`
+	KeyPrefix    string        `yaml:"key_prefix"`
+	DialTimeout  time.Duration `yaml:"dial_timeout"`
+	ReadTimeout  time.Duration `yaml:"read_timeout"`
+	WriteTimeout time.Duration `yaml:"write_timeout"`
+}
+
+func (cfg *RedisConfig) UnmarshalYAML(node *yaml.Node) error {
+	type plain RedisConfig
+	return decodeSearchSection(node, (*plain)(cfg), "redis", []string{"db"},
+		[]string{"enabled", "addr", "password", "key_prefix", "dial_timeout", "read_timeout", "write_timeout"})
+}
+
+func (cfg RedisConfig) Validate() error {
+	host, port, err := net.SplitHostPort(cfg.Addr)
+	portNumber, portErr := strconv.Atoi(port)
+	if err != nil || strings.TrimSpace(host) == "" || portErr != nil || portNumber < 1 || portNumber > 65535 || strings.ContainsRune(cfg.Addr, 0) {
+		return errors.New("redis.addr (REDIS_ADDR) must include a host and valid port")
+	}
+	if cfg.DB < 0 || cfg.DB > 15 {
+		return errors.New("redis.db (REDIS_DB) must be between 0 and 15")
+	}
+	if strings.TrimSpace(cfg.KeyPrefix) == "" || strings.ContainsRune(cfg.KeyPrefix, 0) {
+		return errors.New("redis.key_prefix (REDIS_KEY_PREFIX) must be nonblank and contain no NUL")
+	}
+	if cfg.DialTimeout <= 0 || cfg.ReadTimeout <= 0 || cfg.WriteTimeout <= 0 {
+		return errors.New("redis dial_timeout, read_timeout and write_timeout must be positive")
+	}
+	return nil
+}
+
+type SearchConfig struct {
+	DefaultLimit   int           `yaml:"default_limit"`
+	MaxLimit       int           `yaml:"max_limit"`
+	MaxQueryLength int           `yaml:"max_query_length"`
+	CacheTTL       time.Duration `yaml:"cache_ttl"`
+}
+
+func DefaultSearchConfig() SearchConfig {
+	return SearchConfig{DefaultLimit: 20, MaxLimit: 100, MaxQueryLength: 200, CacheTTL: 5 * time.Minute}
+}
+
+func (cfg *SearchConfig) UnmarshalYAML(node *yaml.Node) error {
+	type plain SearchConfig
+	return decodeSearchSection(node, (*plain)(cfg), "search",
+		[]string{"default_limit", "max_limit", "max_query_length"}, []string{"cache_ttl"})
+}
+
+func (cfg SearchConfig) Validate() error {
+	if cfg.DefaultLimit < 1 || cfg.MaxLimit < cfg.DefaultLimit {
+		return errors.New("search.default_limit (SEARCH_DEFAULT_LIMIT) must be positive and at most max_limit (SEARCH_MAX_LIMIT)")
+	}
+	if cfg.MaxQueryLength < 1 || cfg.CacheTTL <= 0 {
+		return errors.New("search.max_query_length (SEARCH_MAX_QUERY_LENGTH) and cache_ttl (SEARCH_CACHE_TTL) must be positive")
+	}
+	return nil
+}
+
+func decodeSearchSection(node *yaml.Node, cfg any, section string, integers, otherFields []string) error {
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: %s must be a mapping", node.Line, section)
+	}
+	for i := 0; i < len(node.Content); i += 2 {
+		key, value := node.Content[i], node.Content[i+1]
+		switch {
+		case slices.Contains(integers, key.Value):
+			if value.Kind == yaml.AliasNode {
+				value = value.Alias
+			}
+			if value.Kind != yaml.ScalarNode || value.ShortTag() != "!!int" {
+				return fmt.Errorf("line %d: %s.%s must be an integer", value.Line, section, key.Value)
+			}
+		case slices.Contains(otherFields, key.Value):
+		default:
+			return fmt.Errorf("line %d: unknown %s field %q", key.Line, section, key.Value)
+		}
+	}
+	return node.Decode(cfg)
+}
+
 type Config struct {
+	Redis      RedisConfig      `yaml:"redis"`
+	Search     SearchConfig     `yaml:"search"`
 	Document   DocumentConfig   `yaml:"document"`
 	Sync       SyncConfig       `yaml:"sync"`
 	Scanner    ScannerConfig    `yaml:"scanner"`
@@ -288,6 +376,11 @@ type CORSConfig struct {
 
 func defaults() Config {
 	return Config{
+		Redis: RedisConfig{
+			Enabled: true, Addr: "localhost:6379", KeyPrefix: "projectlens",
+			DialTimeout: 300 * time.Millisecond, ReadTimeout: 300 * time.Millisecond, WriteTimeout: 300 * time.Millisecond,
+		},
+		Search:   DefaultSearchConfig(),
 		Document: DocumentConfig{MaxContentBytes: DefaultDocumentMaxContentBytes},
 		Scanner:  DefaultScannerConfig(),
 		Sync:     SyncConfig{RetainSuperseded: 2, FailedRetention: 24 * time.Hour},
@@ -385,6 +478,9 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		name   string
 		target *string
 	}{
+		{"REDIS_ADDR", &cfg.Redis.Addr},
+		{"REDIS_PASSWORD", &cfg.Redis.Password},
+		{"REDIS_KEY_PREFIX", &cfg.Redis.KeyPrefix},
 		{"SCANNER_CACHE_DIR", &cfg.Scanner.CacheDir},
 		{"WORKER_MODE", &cfg.Worker.Mode},
 		{"WORKER_ID", &cfg.Worker.ID},
@@ -423,6 +519,10 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		name   string
 		target *int
 	}{
+		{"REDIS_DB", &cfg.Redis.DB},
+		{"SEARCH_DEFAULT_LIMIT", &cfg.Search.DefaultLimit},
+		{"SEARCH_MAX_LIMIT", &cfg.Search.MaxLimit},
+		{"SEARCH_MAX_QUERY_LENGTH", &cfg.Search.MaxQueryLength},
 		{"SYNC_RETAIN_SUPERSEDED", &cfg.Sync.RetainSuperseded},
 		{"SCANNER_MAX_FILES", &cfg.Scanner.MaxFiles},
 		{"SCANNER_MAX_PATH_LENGTH", &cfg.Scanner.MaxPathLength},
@@ -438,12 +538,20 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 			*field.target = number
 		}
 	}
-	if value, ok := lookupEnv("DB_AUTO_MIGRATE"); ok {
-		enabled, err := strconv.ParseBool(value)
-		if err != nil {
-			return fmt.Errorf("DB_AUTO_MIGRATE must be a boolean: %w", err)
+	for _, field := range []struct {
+		name   string
+		target *bool
+	}{
+		{"DB_AUTO_MIGRATE", &cfg.Database.AutoMigrate},
+		{"REDIS_ENABLED", &cfg.Redis.Enabled},
+	} {
+		if value, ok := lookupEnv(field.name); ok {
+			enabled, err := strconv.ParseBool(value)
+			if err != nil {
+				return fmt.Errorf("%s must be a boolean: %w", field.name, err)
+			}
+			*field.target = enabled
 		}
-		cfg.Database.AutoMigrate = enabled
 	}
 	if value, ok := lookupEnv("SERVER_PORT"); ok {
 		port, err := strconv.Atoi(value)
@@ -457,6 +565,10 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		name   string
 		target *time.Duration
 	}{
+		{"REDIS_DIAL_TIMEOUT", &cfg.Redis.DialTimeout},
+		{"REDIS_READ_TIMEOUT", &cfg.Redis.ReadTimeout},
+		{"REDIS_WRITE_TIMEOUT", &cfg.Redis.WriteTimeout},
+		{"SEARCH_CACHE_TTL", &cfg.Search.CacheTTL},
 		{"SYNC_FAILED_RETENTION", &cfg.Sync.FailedRetention},
 		{"SCANNER_GIT_TIMEOUT", &cfg.Scanner.GitTimeout},
 		{"WORKER_POLL_INTERVAL", &cfg.Worker.PollInterval},
@@ -530,6 +642,12 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 }
 
 func (cfg Config) Validate() error {
+	if err := cfg.Redis.Validate(); err != nil {
+		return err
+	}
+	if err := cfg.Search.Validate(); err != nil {
+		return err
+	}
 	if cfg.Document.MaxContentBytes < 1 || cfg.Document.MaxContentBytes > MaxDocumentContentBytesCeiling {
 		return fmt.Errorf("document.max_content_bytes (DOCUMENT_MAX_CONTENT_BYTES) must be between 1 and %d", MaxDocumentContentBytesCeiling)
 	}

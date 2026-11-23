@@ -424,3 +424,62 @@ func TestDocumentConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestSearchAndRedisConfig(t *testing.T) {
+	cfg, err := load("", env(nil))
+	wantRedis := RedisConfig{Enabled: true, Addr: "localhost:6379", KeyPrefix: "projectlens",
+		DialTimeout: 300 * time.Millisecond, ReadTimeout: 300 * time.Millisecond, WriteTimeout: 300 * time.Millisecond}
+	wantSearch := SearchConfig{DefaultLimit: 20, MaxLimit: 100, MaxQueryLength: 200, CacheTTL: 5 * time.Minute}
+	if err != nil || cfg.Redis != wantRedis || cfg.Search != wantSearch {
+		t.Fatalf("default Redis = %+v, search = %+v, error = %v", cfg.Redis, cfg.Search, err)
+	}
+	path := writeConfig(t, `
+redis: {enabled: false, addr: "cache:6380", password: "testing", db: 3, key_prefix: "example", dial_timeout: 1s, read_timeout: 2s, write_timeout: 3s}
+search: {default_limit: 10, max_limit: 50, max_query_length: 123, cache_ttl: 8m}
+`)
+	cfg, err = load(path, env(map[string]string{
+		"REDIS_ENABLED": "true", "REDIS_ADDR": "[::1]:6381", "REDIS_PASSWORD": "", "REDIS_DB": "5",
+		"REDIS_KEY_PREFIX": "override", "REDIS_DIAL_TIMEOUT": "100ms", "REDIS_READ_TIMEOUT": "200ms", "REDIS_WRITE_TIMEOUT": "500ms",
+		"SEARCH_DEFAULT_LIMIT": "7", "SEARCH_MAX_LIMIT": "23", "SEARCH_MAX_QUERY_LENGTH": "80", "SEARCH_CACHE_TTL": "1m",
+	}))
+	wantRedis = RedisConfig{Enabled: true, Addr: "[::1]:6381", DB: 5, KeyPrefix: "override",
+		DialTimeout: 100 * time.Millisecond, ReadTimeout: 200 * time.Millisecond, WriteTimeout: 500 * time.Millisecond}
+	wantSearch = SearchConfig{DefaultLimit: 7, MaxLimit: 23, MaxQueryLength: 80, CacheTTL: time.Minute}
+	if err != nil || cfg.Redis != wantRedis || cfg.Search != wantSearch {
+		t.Fatalf("overridden Redis = %+v, search = %+v, error = %v", cfg.Redis, cfg.Search, err)
+	}
+	cfg, err = load(path, env(nil))
+	if err != nil || cfg.Redis.Enabled || cfg.Redis.Addr != "cache:6380" || cfg.Redis.Password != "testing" ||
+		cfg.Redis.DB != 3 || cfg.Redis.KeyPrefix != "example" || cfg.Redis.ReadTimeout != 2*time.Second ||
+		cfg.Search != (SearchConfig{DefaultLimit: 10, MaxLimit: 50, MaxQueryLength: 123, CacheTTL: 8 * time.Minute}) {
+		t.Fatalf("YAML Redis = %+v, search = %+v, error = %v", cfg.Redis, cfg.Search, err)
+	}
+}
+
+func TestInvalidSearchAndRedisConfig(t *testing.T) {
+	for _, yaml := range []string{
+		"redis: true", "redis: {db: 1.5}", "redis: {db: -1}", "redis: {db: 16}",
+		"redis: {extra: true}", "redis: {addr: localhost}", "redis: {key_prefix: ' '}",
+		"redis: {dial_timeout: 0s}", "redis: {read_timeout: -1ms}", "redis: {write_timeout: 0s}",
+		"search: example", "search: {default_limit: 3.5}", "search: {max_limit: '3'}",
+		"search: {max_query_length: 3.2}", "search: {max_query_length: 0}", "search: {extra: 1}",
+		"search: {default_limit: 101}", "search: {cache_ttl: 0s}",
+	} {
+		t.Run(yaml, func(t *testing.T) {
+			if _, err := load(writeConfig(t, yaml), env(nil)); err == nil {
+				t.Fatal("invalid YAML configuration accepted")
+			}
+		})
+	}
+	for key, value := range map[string]string{
+		"REDIS_ENABLED": "maybe", "REDIS_DB": "1.5", "REDIS_ADDR": "cache:0",
+		"SEARCH_DEFAULT_LIMIT": "20.1", "SEARCH_MAX_LIMIT": "10", "SEARCH_CACHE_TTL": "0",
+	} {
+		t.Run(key, func(t *testing.T) {
+			_, err := load("", env(map[string]string{key: value}))
+			if err == nil || !strings.Contains(err.Error(), key) {
+				t.Fatalf("expected %s config error, got %v", key, err)
+			}
+		})
+	}
+}

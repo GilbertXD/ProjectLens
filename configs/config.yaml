@@ -68,3 +68,19 @@ sync:
 
 document:
   max_content_bytes: 1048576
+
+redis:
+  enabled: true
+  addr: localhost:6379
+  password: ""
+  db: 0
+  key_prefix: projectlens
+  dial_timeout: 300ms
+  read_timeout: 300ms
+  write_timeout: 300ms
+
+search:
+  default_limit: 20
+  max_limit: 100
+  max_query_length: 200
+  cache_ttl: 5m

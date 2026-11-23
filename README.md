@@ -37,7 +37,7 @@ docker compose config -q
 
 The server requires PostgreSQL. For a Go process on the host, provision a database matching `DATABASE_URL` in `.env.example` or export a DSN for an existing database. Compose starts its own PostgreSQL instance and stores data in the named `postgres_data` volume. `GET /readyz` reports database connectivity, and `GET /healthz` continues to report process health.
 
-The server applies embedded migrations on startup by default. Set `DB_AUTO_MIGRATE=false` if you apply migrations separately using `make migrate-up`. Use `make migrate-status` to inspect migration state. `make migrate-down` rolls back one migration at a time. From the latest version, rollbacks drop documents first, then source files and snapshots, then jobs, then repositories, and finally projects and project audit logs.
+The server applies embedded migrations on startup by default. Set `DB_AUTO_MIGRATE=false` if you apply migrations separately using `make migrate-up`. Use `make migrate-status` to inspect migration state. `make migrate-down` rolls back one migration at a time. From the latest version, rollbacks remove unified search first, then drop documents, source files and snapshots, jobs, repositories, and finally projects and project audit logs.
 
 | Method | Path | Result |
 | --- | --- | --- |
@@ -57,6 +57,29 @@ curl -fsS http://localhost:8080/api/v1/projects \
 ```
 
 Set `TEST_DATABASE_URL` to a PostgreSQL database where the test user can create schemas, then run `make test-integration`. Each test creates and drops its own schema. With the variable unset, the PostgreSQL tests skip.
+
+## Unified Search API
+
+Search a project's active local Git and GitHub snapshots and its standalone Markdown documents with `GET /api/v1/projects/:id/search`.
+
+```sh
+curl -G "http://localhost:8080/api/v1/projects/$PROJECT_ID/search" \
+  --data-urlencode 'q="connection pool" OR timeout' \
+  --data-urlencode 'source_type=local_git,github,document' \
+  --data-urlencode 'limit=20' \
+  --data-urlencode 'offset=0'
+```
+
+- `q` is required and defaults to a maximum of 200 characters. Use quotes for phrases, `OR` for alternatives, and a minus sign to exclude a term.
+- `source_type` accepts `local_git`, `github`, and `document`. Repeat the parameter or separate the values with commas. By default, all source types are included.
+- `repository_id` and `path_prefix` restrict results to files in a specific repository and to paths beginning with a literal prefix. Either filter excludes standalone documents.
+- `limit` defaults to 20 and accepts up to 100. `offset` defaults to zero. Pages include the full match `total` and an empty `items` array when the offset is beyond the last match.
+
+Each hit has a relevance score, a snippet with HTML-escaped text and `<mark>` highlights, and a `location.api_path` to fetch the full content. File locations include repository, snapshot, commit, and path information. GitHub hits include a link pinned to the indexed commit. Document locations include the document ID, title, and version. A content match includes its first matching line when available.
+
+Redis is enabled by default. Compose starts Redis, publishes port 6379 by default (`REDIS_PORT`), and connects the API to `redis:6379`. A server running on the host uses `localhost:6379` by default. If you use `.env.example` as a Compose environment file, set `REDIS_ADDR=redis:6379` for the container. Set `REDIS_ENABLED=false` to bypass the cache, or configure `REDIS_*` and `SEARCH_*` using the values in `.env.example`. Cached results expire after five minutes by default. Search reads the project's version from PostgreSQL so writes that change searchable content or provenance invalidate older results. Responses include `X-Search-Version` and `X-Search-Cache`, whose value is `hit`, `miss`, `bypass`, or `degraded`. Redis errors fall back to PostgreSQL, and readiness checks PostgreSQL.
+
+With `TEST_DATABASE_URL` set, the search integration tests use an in-process Redis server by default. Set `TEST_REDIS_URL` to exercise caching against an external Redis instance. Outage and recovery tests use their own isolated Redis server.
 
 ## Markdown Documents API
 

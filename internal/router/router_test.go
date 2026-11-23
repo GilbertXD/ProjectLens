@@ -144,3 +144,16 @@ func TestDocumentRoutes(t *testing.T) {
 		t.Fatalf("missing routes: %v", want)
 	}
 }
+
+func TestSearchRoute(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	engine := New(config.Config{App: config.AppConfig{Env: "test"}}, log, Dependencies{
+		Projects: handler.NewProjectHandler(nil, log), Search: handler.NewSearchHandler(nil, log),
+	})
+	for _, route := range engine.Routes() {
+		if route.Method == http.MethodGet && route.Path == "/api/v1/projects/:id/search" {
+			return
+		}
+	}
+	t.Fatal("project search route missing")
+}
