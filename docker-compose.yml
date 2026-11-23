@@ -6,7 +6,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    environment:
+    environment: &api-environment
       APP_NAME: "${APP_NAME:-ProjectLens}"
       APP_ENV: "${APP_ENV:-production}"
       APP_VERSION: "${APP_VERSION:-0.1.0}"
@@ -32,12 +32,38 @@ services:
       GITHUB_TIMEOUT: "${GITHUB_TIMEOUT:-10s}"
       GITHUB_USER_AGENT: "${GITHUB_USER_AGENT:-ProjectLens}"
       DB_AUTO_MIGRATE: "${DB_AUTO_MIGRATE:-true}"
+      WORKER_MODE: "${WORKER_MODE:-embedded}"
+      WORKER_ID: "${WORKER_ID:-}"
+      WORKER_CONCURRENCY: "${WORKER_CONCURRENCY:-4}"
+      WORKER_POLL_INTERVAL: "${WORKER_POLL_INTERVAL:-500ms}"
+      WORKER_LEASE_DURATION: "${WORKER_LEASE_DURATION:-30s}"
+      WORKER_HEARTBEAT_INTERVAL: "${WORKER_HEARTBEAT_INTERVAL:-10s}"
+      WORKER_DEFAULT_TIMEOUT: "${WORKER_DEFAULT_TIMEOUT:-5m}"
+      WORKER_DEFAULT_MAX_ATTEMPTS: "${WORKER_DEFAULT_MAX_ATTEMPTS:-3}"
+      WORKER_RETRY_BASE_DELAY: "${WORKER_RETRY_BASE_DELAY:-2s}"
+      WORKER_RETRY_MAX_DELAY: "${WORKER_RETRY_MAX_DELAY:-1m}"
+      WORKER_SHUTDOWN_TIMEOUT: "${WORKER_SHUTDOWN_TIMEOUT:-15s}"
+    stop_grace_period: "${WORKER_SHUTDOWN_TIMEOUT:-15s}"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
       interval: 30s
       timeout: 3s
       start_period: 5s
       retries: 3
+
+  worker:
+    profiles: ["worker"]
+    build: .
+    entrypoint: ["/app/worker"]
+    command: ["-config", "/app/configs/config.yaml"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *api-environment
+    stop_grace_period: "${WORKER_SHUTDOWN_TIMEOUT:-15s}"
+    healthcheck:
+      disable: true
 
   postgres:
     image: postgres:16-alpine

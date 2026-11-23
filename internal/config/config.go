@@ -26,6 +26,7 @@ type GitHubConfig struct {
 }
 
 type Config struct {
+	Worker     WorkerConfig     `yaml:"worker"`
 	Repository RepositoryConfig `yaml:"repository"`
 	GitHub     GitHubConfig     `yaml:"github"`
 	Database   DatabaseConfig   `yaml:"database"`
@@ -33,6 +34,43 @@ type Config struct {
 	Server     ServerConfig     `yaml:"server"`
 	Log        LogConfig        `yaml:"log"`
 	CORS       CORSConfig       `yaml:"cors"`
+}
+
+type WorkerConfig struct {
+	Mode               string        `yaml:"mode"`
+	ID                 string        `yaml:"id"`
+	Concurrency        int           `yaml:"concurrency"`
+	PollInterval       time.Duration `yaml:"poll_interval"`
+	LeaseDuration      time.Duration `yaml:"lease_duration"`
+	HeartbeatInterval  time.Duration `yaml:"heartbeat_interval"`
+	DefaultTimeout     time.Duration `yaml:"default_timeout"`
+	DefaultMaxAttempts int           `yaml:"default_max_attempts"`
+	RetryBaseDelay     time.Duration `yaml:"retry_base_delay"`
+	RetryMaxDelay      time.Duration `yaml:"retry_max_delay"`
+	ShutdownTimeout    time.Duration `yaml:"shutdown_timeout"`
+}
+
+func (cfg *WorkerConfig) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: worker must be a mapping", node.Line)
+	}
+	for i := 0; i < len(node.Content); i += 2 {
+		key, value := node.Content[i], node.Content[i+1]
+		switch key.Value {
+		case "concurrency", "default_max_attempts":
+			if value.Kind == yaml.AliasNode {
+				value = value.Alias
+			}
+			if value.ShortTag() != "!!int" {
+				return fmt.Errorf("line %d: worker.%s must be an integer", value.Line, key.Value)
+			}
+		case "mode", "id", "poll_interval", "lease_duration", "heartbeat_interval", "default_timeout", "retry_base_delay", "retry_max_delay", "shutdown_timeout":
+		default:
+			return fmt.Errorf("line %d: unknown worker field %q", key.Line, key.Value)
+		}
+	}
+	type plain WorkerConfig
+	return node.Decode((*plain)(cfg))
 }
 
 type DatabaseConfig struct {
@@ -114,6 +152,18 @@ type CORSConfig struct {
 
 func defaults() Config {
 	return Config{
+		Worker: WorkerConfig{
+			Mode:               "embedded",
+			Concurrency:        4,
+			PollInterval:       500 * time.Millisecond,
+			LeaseDuration:      30 * time.Second,
+			HeartbeatInterval:  10 * time.Second,
+			DefaultTimeout:     5 * time.Minute,
+			DefaultMaxAttempts: 3,
+			RetryBaseDelay:     2 * time.Second,
+			RetryMaxDelay:      time.Minute,
+			ShutdownTimeout:    15 * time.Second,
+		},
 		Repository: RepositoryConfig{AllowedLocalRoots: []string{}},
 		GitHub:     GitHubConfig{APIBaseURL: "https://api.github.com", Timeout: 10 * time.Second, UserAgent: "ProjectLens"},
 		Database: DatabaseConfig{
@@ -196,6 +246,8 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		name   string
 		target *string
 	}{
+		{"WORKER_MODE", &cfg.Worker.Mode},
+		{"WORKER_ID", &cfg.Worker.ID},
 		{"GITHUB_API_BASE_URL", &cfg.GitHub.APIBaseURL},
 		{"GITHUB_TOKEN", &cfg.GitHub.Token},
 		{"GITHUB_USER_AGENT", &cfg.GitHub.UserAgent},
@@ -227,6 +279,21 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 			*field.target = int32(number)
 		}
 	}
+	for _, field := range []struct {
+		name   string
+		target *int
+	}{
+		{"WORKER_CONCURRENCY", &cfg.Worker.Concurrency},
+		{"WORKER_DEFAULT_MAX_ATTEMPTS", &cfg.Worker.DefaultMaxAttempts},
+	} {
+		if value, ok := lookupEnv(field.name); ok {
+			number, err := strconv.Atoi(value)
+			if err != nil {
+				return fmt.Errorf("%s must be an integer: %w", field.name, err)
+			}
+			*field.target = number
+		}
+	}
 	if value, ok := lookupEnv("DB_AUTO_MIGRATE"); ok {
 		enabled, err := strconv.ParseBool(value)
 		if err != nil {
@@ -246,6 +313,13 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		name   string
 		target *time.Duration
 	}{
+		{"WORKER_POLL_INTERVAL", &cfg.Worker.PollInterval},
+		{"WORKER_LEASE_DURATION", &cfg.Worker.LeaseDuration},
+		{"WORKER_HEARTBEAT_INTERVAL", &cfg.Worker.HeartbeatInterval},
+		{"WORKER_DEFAULT_TIMEOUT", &cfg.Worker.DefaultTimeout},
+		{"WORKER_RETRY_BASE_DELAY", &cfg.Worker.RetryBaseDelay},
+		{"WORKER_RETRY_MAX_DELAY", &cfg.Worker.RetryMaxDelay},
+		{"WORKER_SHUTDOWN_TIMEOUT", &cfg.Worker.ShutdownTimeout},
 		{"GITHUB_TIMEOUT", &cfg.GitHub.Timeout},
 		{"DB_MAX_CONN_LIFETIME", &cfg.Database.MaxConnLifetime},
 		{"DB_MAX_CONN_IDLE_TIME", &cfg.Database.MaxConnIdleTime},
@@ -285,6 +359,25 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 }
 
 func (cfg Config) Validate() error {
+	w := cfg.Worker
+	switch w.Mode {
+	case "embedded", "external", "disabled":
+	default:
+		return errors.New("worker.mode (WORKER_MODE) must be embedded, external, or disabled")
+	}
+	if strings.ContainsRune(w.ID, 0) {
+		return errors.New("worker.id (WORKER_ID) must not contain NUL bytes")
+	}
+	if w.Concurrency < 1 {
+		return errors.New("worker.concurrency (WORKER_CONCURRENCY) must be positive")
+	}
+	if w.DefaultTimeout < time.Second || w.DefaultTimeout > 24*time.Hour {
+		return errors.New("worker.default_timeout (WORKER_DEFAULT_TIMEOUT) must be between 1s and 24h")
+	}
+	if w.DefaultMaxAttempts < 1 || w.DefaultMaxAttempts > 100 {
+		return errors.New("worker.default_max_attempts (WORKER_DEFAULT_MAX_ATTEMPTS) must be between 1 and 100")
+	}
+
 	for _, root := range cfg.Repository.AllowedLocalRoots {
 		if !filepath.IsAbs(root) || strings.ContainsRune(root, 0) {
 			return errors.New("repository.allowed_local_roots (REPO_ALLOWED_LOCAL_ROOTS) must contain absolute paths without NUL")
@@ -324,6 +417,13 @@ func (cfg Config) Validate() error {
 		name  string
 		value time.Duration
 	}{
+		{"worker.poll_interval (WORKER_POLL_INTERVAL)", cfg.Worker.PollInterval},
+		{"worker.lease_duration (WORKER_LEASE_DURATION)", cfg.Worker.LeaseDuration},
+		{"worker.heartbeat_interval (WORKER_HEARTBEAT_INTERVAL)", cfg.Worker.HeartbeatInterval},
+		{"worker.default_timeout (WORKER_DEFAULT_TIMEOUT)", cfg.Worker.DefaultTimeout},
+		{"worker.retry_base_delay (WORKER_RETRY_BASE_DELAY)", cfg.Worker.RetryBaseDelay},
+		{"worker.retry_max_delay (WORKER_RETRY_MAX_DELAY)", cfg.Worker.RetryMaxDelay},
+		{"worker.shutdown_timeout (WORKER_SHUTDOWN_TIMEOUT)", cfg.Worker.ShutdownTimeout},
 		{"database.max_conn_lifetime (DB_MAX_CONN_LIFETIME)", cfg.Database.MaxConnLifetime},
 		{"database.max_conn_idle_time (DB_MAX_CONN_IDLE_TIME)", cfg.Database.MaxConnIdleTime},
 		{"database.health_check_period (DB_HEALTH_CHECK_PERIOD)", cfg.Database.HealthCheckPeriod},
@@ -336,6 +436,12 @@ func (cfg Config) Validate() error {
 		if field.value <= 0 {
 			return fmt.Errorf("%s must be positive, got %s", field.name, field.value)
 		}
+	}
+	if w.HeartbeatInterval >= w.LeaseDuration {
+		return errors.New("worker.heartbeat_interval (WORKER_HEARTBEAT_INTERVAL) must be less than lease_duration")
+	}
+	if w.RetryMaxDelay < w.RetryBaseDelay {
+		return errors.New("worker.retry_max_delay (WORKER_RETRY_MAX_DELAY) must be at least retry_base_delay")
 	}
 	switch cfg.Log.Level {
 	case "debug", "info", "warn", "error":

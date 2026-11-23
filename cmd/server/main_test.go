@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"io"
 	"path/filepath"
 	"strings"
@@ -38,5 +40,32 @@ func TestRunInvalidDatabaseConfiguration(t *testing.T) {
 	var stderr bytes.Buffer
 	if code := run(nil, io.Discard, &stderr); code != 1 || !strings.Contains(stderr.String(), "DATABASE_URL") {
 		t.Fatalf("exit = %d, stderr = %s, want database validation error", code, &stderr)
+	}
+}
+
+func TestRunHTTPAndWorkerModes(t *testing.T) {
+	for _, mode := range []string{"embedded", "external", "disabled"} {
+		t.Run(mode, func(t *testing.T) {
+			drained := make(chan struct{})
+			want := errors.New("HTTP listener failed")
+			err := runHTTPAndWorker(t.Context(), mode, func(context.Context) error { return want },
+				func(ctx context.Context) {
+					<-ctx.Done()
+					close(drained)
+				})
+			if !errors.Is(err, want) {
+				t.Fatalf("err = %v", err)
+			}
+			select {
+			case <-drained:
+				if mode != "embedded" {
+					t.Fatal("started worker in API-only mode")
+				}
+			default:
+				if mode == "embedded" {
+					t.Fatal("returned before worker drained")
+				}
+			}
+		})
 	}
 }

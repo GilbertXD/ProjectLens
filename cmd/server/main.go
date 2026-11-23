@@ -20,6 +20,7 @@ import (
 	"projectlens/internal/router"
 	"projectlens/internal/server"
 	"projectlens/internal/service"
+	"projectlens/internal/worker"
 )
 
 func main() {
@@ -74,14 +75,40 @@ func run(args []string, stdout, stderr io.Writer) int {
 	projects := service.NewProjectService(projectStore, db.NewPgxTxManager(pool))
 	repositories := service.NewRepositoryService(projectStore, repository.NewPostgresRepositoryStore(pool),
 		gitrepo.NewLocalInspector(cfg.Repository.AllowedLocalRoots), github.NewClient(cfg.GitHub, nil))
+	registry := &worker.Registry{}
+	if err := worker.RegisterMockHandlers(registry); err != nil {
+		fmt.Fprintf(stderr, "register job handlers: %v\n", err)
+		return 1
+	}
+	jobStore := repository.NewPostgresJobStore(pool)
+	jobs := service.NewJobService(jobStore, registry, cfg.Worker)
 	routes := router.New(cfg, log, router.Dependencies{
 		Projects:     handler.NewProjectHandler(projects, log),
 		Repositories: handler.NewRepositoryHandler(repositories, log),
 		Pinger:       pool,
+		Jobs:         handler.NewJobHandler(jobs, log),
 	})
-	if err := server.New(cfg, log, routes).Run(ctx); err != nil {
+	runner := worker.NewRunner(jobStore, registry, cfg.Worker, log)
+	if err := runHTTPAndWorker(ctx, cfg.Worker.Mode, server.New(cfg, log, routes).Run, runner.Run); err != nil {
 		fmt.Fprintf(stderr, "run server: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+// Stop the worker when HTTP exits, including listener startup failures.
+func runHTTPAndWorker(ctx context.Context, mode string, serve func(context.Context) error, work func(context.Context)) error {
+	if mode != "embedded" {
+		return serve(ctx)
+	}
+	ctx, stop := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		work(ctx)
+	}()
+	err := serve(ctx)
+	stop()
+	<-done
+	return err
 }

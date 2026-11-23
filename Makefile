@@ -1,10 +1,16 @@
-.PHONY: run build test vet tidy docker-up docker-down
+.PHONY: run run-worker build build-worker test vet tidy docker-up docker-down
 
 run:
 	go run ./cmd/server
 
-build:
+run-worker:
+	go run ./cmd/worker
+
+build: build-worker
 	go build -o bin/projectlens-server ./cmd/server
+
+build-worker:
+	go build -o bin/projectlens-worker ./cmd/worker
 
 test:
 	go test -race -v ./...

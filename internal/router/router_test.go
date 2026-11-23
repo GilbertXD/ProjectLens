@@ -104,3 +104,19 @@ func TestRepositoryRoutes(t *testing.T) {
 		t.Fatalf("missing routes: %v", want)
 	}
 }
+
+func TestJobRoutes(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	engine := New(config.Config{App: config.AppConfig{Env: "test"}}, log, Dependencies{
+		Jobs: handler.NewJobHandler(nil, log),
+	})
+	routes := make(map[string]bool)
+	for _, route := range engine.Routes() {
+		routes[route.Method+" "+route.Path] = true
+	}
+	for _, want := range []string{"POST /api/v1/jobs", "GET /api/v1/jobs", "GET /api/v1/jobs/:id", "POST /api/v1/jobs/:id/cancel"} {
+		if !routes[want] {
+			t.Errorf("missing route %s", want)
+		}
+	}
+}

@@ -132,6 +132,13 @@ func TestProjectLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := db.MigrateDown(ctx, pool); err != nil {
+		t.Fatalf("migrate jobs down: %v", err)
+	}
+	var jobsRemoved bool
+	if err := pool.QueryRow(ctx, "SELECT to_regclass('jobs') IS NULL AND to_regclass('repositories') IS NOT NULL").Scan(&jobsRemoved); err != nil || !jobsRemoved {
+		t.Fatalf("jobs migration down did not preserve repositories: removed=%t, error=%v", jobsRemoved, err)
+	}
+	if err := db.MigrateDown(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 	var removed bool

@@ -38,3 +38,16 @@ github:
   token: ""
   timeout: 10s
   user_agent: ProjectLens
+
+worker:
+  mode: embedded
+  id: ""
+  concurrency: 4
+  poll_interval: 500ms
+  lease_duration: 30s
+  heartbeat_interval: 10s
+  default_timeout: 5m
+  default_max_attempts: 3
+  retry_base_delay: 2s
+  retry_max_delay: 1m
+  shutdown_timeout: 15s

@@ -5,12 +5,14 @@ RUN go mod download
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
 COPY migrations/ ./migrations/
-RUN CGO_ENABLED=0 go build -o /out/server ./cmd/server
+RUN CGO_ENABLED=0 go build -o /out/server ./cmd/server \
+ && CGO_ENABLED=0 go build -o /out/worker ./cmd/worker
 
 FROM alpine:3.21
 RUN apk add --no-cache git && addgroup -S app && adduser -S -G app app
 WORKDIR /app
 COPY --from=build /out/server /app/server
+COPY --from=build /out/worker /app/worker
 COPY configs/config.yaml /app/configs/config.yaml
 USER app:app
 EXPOSE 8080

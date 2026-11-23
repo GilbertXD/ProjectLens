@@ -88,3 +88,47 @@ List responses contain `items`, `total`, `limit`, and `offset`. Error responses 
 | `github.token` | `GITHUB_TOKEN` | Empty (anonymous requests) |
 | `github.timeout` | `GITHUB_TIMEOUT` | `10s` |
 | `github.user_agent` | `GITHUB_USER_AGENT` | `ProjectLens` |
+
+## Background jobs
+
+The API writes jobs to PostgreSQL and returns immediately. By default, the server runs an embedded worker. Set `WORKER_MODE=external` to run the API and worker as separate processes, or `WORKER_MODE=disabled` to run the API without a local worker. Both API-only modes still accept jobs. Pending jobs wait for an available worker.
+
+```sh
+make build
+WORKER_MODE=external make run
+# In a separate terminal, using the same database:
+make run-worker
+
+# Or run the API and a separate worker in Compose:
+WORKER_MODE=external docker compose --profile worker up --build -d
+```
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `WORKER_MODE` | `embedded` | Server startup mode |
+| `WORKER_ID` | Generated UUID | Worker identity override |
+| `WORKER_CONCURRENCY` | `4` | Concurrent executions per worker |
+| `WORKER_POLL_INTERVAL` | `500ms` | Queue and expired-lease polling interval |
+| `WORKER_LEASE_DURATION` | `30s` | Duration of a claim or renewal |
+| `WORKER_HEARTBEAT_INTERVAL` | `10s` | Lease renewal interval, shorter than the lease duration |
+| `WORKER_DEFAULT_TIMEOUT` | `5m` | Execution timeout per attempt, stored in whole seconds |
+| `WORKER_DEFAULT_MAX_ATTEMPTS` | `3` | Total attempts, including the initial execution |
+| `WORKER_RETRY_BASE_DELAY` | `2s` | Initial failure retry delay and delay after lease recovery |
+| `WORKER_RETRY_MAX_DELAY` | `1m` | Cap on exponential backoff after execution failures |
+| `WORKER_SHUTDOWN_TIMEOUT` | `15s` | Time to drain active executions before cancelling their contexts |
+
+```sh
+curl -X POST http://localhost:8080/api/v1/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"mock.sleep","payload":{"duration_ms":1500},"idempotency_key":"demo-sleep"}'
+```
+
+- `POST /api/v1/jobs` returns `202` with the new job. Reusing a key with the same type and equivalent JSON payload returns the existing job with `200`. A different type or payload returns `409`. Optional fields include `max_attempts`, `timeout_seconds`, and an RFC 3339 `run_at`.
+- `GET /api/v1/jobs` accepts `status`, `type`, `limit` (default 20, maximum 100), and `offset`. Use `GET /api/v1/jobs/:id` to inspect the status and result.
+- `POST /api/v1/jobs/:id/cancel` cancels pending jobs immediately and requests cooperative cancellation for running jobs. Cancelling a cancelled job returns its current state. Succeeded and failed jobs return `409`.
+
+The built-in types are `mock.echo` (optional `delay_ms`), `mock.sleep` (`duration_ms`, default 100), `mock.fail` (optional `delay_ms`, `error_message`, and `permanent`), and `mock.flaky` (`succeed_on_attempt`, default 2).
+
+A worker renews its lease while an attempt runs. An expired lease lets another worker retry the job if attempts remain. A cancellation request takes precedence during recovery. Job handlers should honor context cancellation and make external side effects safe to repeat because a worker can lose its lease after performing work. The enqueue idempotency key deduplicates job creation.
+
+To run the PostgreSQL lifecycle, concurrency, and API integration tests, point `TEST_DATABASE_URL` at a PostgreSQL database whose user can create schemas and run `make test-integration`.

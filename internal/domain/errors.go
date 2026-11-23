@@ -13,3 +13,5 @@ var (
 	ErrRateLimited         = errors.New("upstream rate limit exceeded")
 	ErrUpstreamUnavailable = errors.New("upstream service unavailable")
 )
+
+var ErrDuplicateJobKey = errors.New("duplicate job idempotency key")

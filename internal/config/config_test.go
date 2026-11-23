@@ -245,3 +245,57 @@ func TestInvalidRepositoryConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkerConfig(t *testing.T) {
+	cfg, err := load("", env(nil))
+	want := WorkerConfig{
+		Mode: "embedded", Concurrency: 4, PollInterval: 500 * time.Millisecond,
+		LeaseDuration: 30 * time.Second, HeartbeatInterval: 10 * time.Second,
+		DefaultTimeout: 5 * time.Minute, DefaultMaxAttempts: 3, RetryBaseDelay: 2 * time.Second,
+		RetryMaxDelay: time.Minute, ShutdownTimeout: 15 * time.Second,
+	}
+	if err != nil || cfg.Worker != want {
+		t.Fatalf("defaults = %+v, err = %v", cfg.Worker, err)
+	}
+	cfg, err = load(writeConfig(t, "worker:\n  mode: disabled\n  id: yaml\n"), env(map[string]string{
+		"WORKER_MODE": "external", "WORKER_ID": "node-1", "WORKER_CONCURRENCY": "2", "WORKER_POLL_INTERVAL": "3s",
+		"WORKER_LEASE_DURATION": "12s", "WORKER_HEARTBEAT_INTERVAL": "4s", "WORKER_DEFAULT_TIMEOUT": "1h",
+		"WORKER_DEFAULT_MAX_ATTEMPTS": "12", "WORKER_RETRY_BASE_DELAY": "3s", "WORKER_RETRY_MAX_DELAY": "4s",
+		"WORKER_SHUTDOWN_TIMEOUT": "9s",
+	}))
+	want = WorkerConfig{Mode: "external", ID: "node-1", Concurrency: 2, PollInterval: 3 * time.Second,
+		LeaseDuration: 12 * time.Second, HeartbeatInterval: 4 * time.Second, DefaultTimeout: time.Hour,
+		DefaultMaxAttempts: 12, RetryBaseDelay: 3 * time.Second, RetryMaxDelay: 4 * time.Second, ShutdownTimeout: 9 * time.Second}
+	if err != nil || cfg.Worker != want {
+		t.Fatalf("overrides = %+v, err = %v", cfg.Worker, err)
+	}
+}
+
+func TestWorkerInvalidConfig(t *testing.T) {
+	for _, input := range []string{"concurrency: 2.5", "default_max_attempts: 3.0", "unknown: true"} {
+		t.Run(input, func(t *testing.T) {
+			if _, err := load(writeConfig(t, "worker:\n  "+input+"\n"), env(nil)); err == nil {
+				t.Fatalf("accepted %q", input)
+			}
+		})
+	}
+	for key, value := range map[string]string{
+		"WORKER_MODE": "other", "WORKER_CONCURRENCY": "0", "WORKER_POLL_INTERVAL": "0s",
+		"WORKER_LEASE_DURATION": "-1s", "WORKER_HEARTBEAT_INTERVAL": "30s", "WORKER_DEFAULT_TIMEOUT": "999ms",
+		"WORKER_DEFAULT_MAX_ATTEMPTS": "101", "WORKER_RETRY_BASE_DELAY": "0s", "WORKER_RETRY_MAX_DELAY": "1s",
+		"WORKER_SHUTDOWN_TIMEOUT": "0s",
+	} {
+		t.Run(key, func(t *testing.T) {
+			if _, err := load("", env(map[string]string{key: value})); err == nil {
+				t.Fatalf("accepted %s=%s", key, value)
+			}
+		})
+	}
+}
+
+func TestWorkerIDRejectsNUL(t *testing.T) {
+	_, err := load("", env(map[string]string{"WORKER_ID": "node\x00one"}))
+	if err == nil || !strings.Contains(err.Error(), "worker.id (WORKER_ID)") {
+		t.Fatalf("expected worker ID validation error, got %v", err)
+	}
+}
