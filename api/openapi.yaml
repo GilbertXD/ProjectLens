@@ -1,0 +1,1374 @@
+openapi: "3.0.3"
+info:
+  title: "ProjectLens API"
+  version: "0.1.0"
+  description: "Manage projects, Git snapshots, Markdown documents, search, and asynchronous jobs. API routes require a bearer token when authentication is enabled. The service also handles unauthenticated CORS preflight requests."
+paths:
+  "/healthz":
+    get:
+      operationId: "getHealth"
+      summary: "Check process liveness"
+      security: []
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/Health"}
+  "/readyz":
+    get:
+      operationId: "getReadiness"
+      summary: "Check service readiness"
+      security: []
+      description: "PostgreSQL is required. Redis failure is reported as degraded and search continues through PostgreSQL."
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/Readiness"}
+        "503":
+          description: "PostgreSQL unavailable"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/Readiness"}
+  "/openapi.yaml":
+    get:
+      operationId: "getOpenAPIYAML"
+      summary: "Fetch OpenAPI as YAML"
+      security: []
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/yaml":
+              schema: {"$ref": "#/components/schemas/YAMLSpecification"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+  "/openapi.json":
+    get:
+      operationId: "getOpenAPIJSON"
+      summary: "Fetch OpenAPI as JSON"
+      security: []
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/JSONSpecification"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+  "/api/v1/ping":
+    get:
+      operationId: "ping"
+      summary: "Check authenticated API access"
+      security:
+        - {"BearerAuth": []}
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/Ping"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+  "/api/v1/projects":
+    get:
+      operationId: "listProjects"
+      summary: "List projects"
+      security:
+        - {"BearerAuth": []}
+      parameters:
+        - {"$ref": "#/components/parameters/Limit"}
+        - {"$ref": "#/components/parameters/Offset"}
+        - {"name": "status", "in": "query", "schema": {"type": "string", "enum": ["active", "archived"]}}
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/ProjectListResult"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+    post:
+      operationId: "createProject"
+      summary: "Create a project"
+      security:
+        - {"BearerAuth": []}
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema: {"$ref": "#/components/schemas/ProjectInput"}
+      responses:
+        "201":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/Project"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "409": {"$ref": "#/components/responses/Conflict"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+  "/api/v1/projects/{id}":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+    get:
+      operationId: "getProject"
+      summary: "Get a project"
+      security:
+        - {"BearerAuth": []}
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/Project"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+    put:
+      operationId: "replaceProject"
+      summary: "Replace a project"
+      security:
+        - {"BearerAuth": []}
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema: {"$ref": "#/components/schemas/ProjectReplace"}
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/Project"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "409": {"$ref": "#/components/responses/Conflict"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+    patch:
+      operationId: "patchProject"
+      summary: "Update selected project fields"
+      security:
+        - {"BearerAuth": []}
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema: {"$ref": "#/components/schemas/ProjectPatch"}
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/Project"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "409": {"$ref": "#/components/responses/Conflict"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+    delete:
+      operationId: "deleteProject"
+      summary: "Delete a project"
+      security:
+        - {"BearerAuth": []}
+      responses:
+        "204":
+          description: "No content"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+  "/api/v1/projects/{id}/repositories":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+    get:
+      operationId: "listRepositories"
+      summary: "List project repositories"
+      security:
+        - {"BearerAuth": []}
+      parameters:
+        - {"$ref": "#/components/parameters/Limit"}
+        - {"$ref": "#/components/parameters/Offset"}
+        - {"name": "source_type", "in": "query", "schema": {"type": "string", "enum": ["local_git", "github"]}}
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/RepositoryListResult"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+    post:
+      operationId: "associateRepository"
+      summary: "Associate a local or public GitHub repository"
+      security:
+        - {"BearerAuth": []}
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema: {"$ref": "#/components/schemas/RepositoryInput"}
+      responses:
+        "201":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/Repository"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "403": {"$ref": "#/components/responses/Forbidden"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "409": {"$ref": "#/components/responses/Conflict"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "429": {"$ref": "#/components/responses/RateLimited"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "502": {"$ref": "#/components/responses/BadGateway"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+  "/api/v1/projects/{id}/repositories/{repoId}":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+    get:
+      operationId: "getRepository"
+      summary: "Get a repository"
+      security:
+        - {"BearerAuth": []}
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/Repository"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+    patch:
+      operationId: "patchRepository"
+      summary: "Update repository name or description"
+      security:
+        - {"BearerAuth": []}
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema: {"$ref": "#/components/schemas/RepositoryPatch"}
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/Repository"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "409": {"$ref": "#/components/responses/Conflict"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+    delete:
+      operationId: "deleteRepository"
+      summary: "Delete a repository"
+      security:
+        - {"BearerAuth": []}
+      responses:
+        "204":
+          description: "No content"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+  "/api/v1/projects/{id}/repositories/{repoId}/sync":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+    post:
+      operationId: "refreshRepository"
+      summary: "Refresh repository metadata"
+      security:
+        - {"BearerAuth": []}
+      description: "To publish searchable Git content, enqueue a repository.sync job with project_id, repository_id and optional ref."
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/Repository"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "403": {"$ref": "#/components/responses/Forbidden"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "409": {"$ref": "#/components/responses/Conflict"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "429": {"$ref": "#/components/responses/RateLimited"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "502": {"$ref": "#/components/responses/BadGateway"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+  "/api/v1/projects/{id}/repositories/{repoId}/snapshots":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+    get:
+      operationId: "listSnapshots"
+      summary: "List repository snapshots"
+      security:
+        - {"BearerAuth": []}
+      parameters:
+        - {"$ref": "#/components/parameters/Limit"}
+        - {"$ref": "#/components/parameters/Offset"}
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/SnapshotListResult"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+  "/api/v1/projects/{id}/repositories/{repoId}/snapshots/active":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+    get:
+      operationId: "getActiveSnapshot"
+      summary: "Get the active repository snapshot"
+      security:
+        - {"BearerAuth": []}
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/Snapshot"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+  "/api/v1/projects/{id}/repositories/{repoId}/files":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+    get:
+      operationId: "searchFiles"
+      summary: "List or filter files in the active snapshot"
+      security:
+        - {"BearerAuth": []}
+      parameters:
+        - {"$ref": "#/components/parameters/Limit"}
+        - {"$ref": "#/components/parameters/Offset"}
+        - {"name": "q", "in": "query", "schema": {"type": "string"}}
+        - {"name": "path_prefix", "in": "query", "schema": {"type": "string"}}
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/SourceFileListResult"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+  "/api/v1/projects/{id}/repositories/{repoId}/files/content":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+    get:
+      operationId: "getFile"
+      summary: "Get a file and its indexed content"
+      security:
+        - {"BearerAuth": []}
+      parameters:
+        - {"name": "path", "in": "query", "required": true, "schema": {"type": "string"}}
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/SourceFile"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+  "/api/v1/projects/{id}/documents":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+    get:
+      operationId: "listDocuments"
+      summary: "List document summaries"
+      security:
+        - {"BearerAuth": []}
+      parameters:
+        - {"$ref": "#/components/parameters/Limit"}
+        - {"$ref": "#/components/parameters/Offset"}
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/DocumentListResult"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+    post:
+      operationId: "createDocument"
+      summary: "Create a Markdown document"
+      security:
+        - {"BearerAuth": []}
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema: {"$ref": "#/components/schemas/DocumentInput"}
+      responses:
+        "201":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+            ETag:
+              description: "Strong, quoted document version."
+              schema: {"type": "string", "example": "\"1\""}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/Document"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+  "/api/v1/projects/{id}/documents/{docId}":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/docId"}
+    get:
+      operationId: "getDocument"
+      summary: "Read a Markdown document"
+      security:
+        - {"BearerAuth": []}
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+            ETag:
+              description: "Strong, quoted document version."
+              schema: {"type": "string", "example": "\"1\""}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/Document"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+    put:
+      operationId: "replaceDocument"
+      summary: "Replace a Markdown document"
+      security:
+        - {"BearerAuth": []}
+      parameters:
+        - {"$ref": "#/components/parameters/IfMatch"}
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema: {"$ref": "#/components/schemas/DocumentUpdate"}
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+            ETag:
+              description: "Strong, quoted document version."
+              schema: {"type": "string", "example": "\"1\""}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/Document"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "409": {"$ref": "#/components/responses/Conflict"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+    patch:
+      operationId: "patchDocument"
+      summary: "Update selected document fields"
+      security:
+        - {"BearerAuth": []}
+      parameters:
+        - {"$ref": "#/components/parameters/IfMatch"}
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema: {"$ref": "#/components/schemas/DocumentPatch"}
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+            ETag:
+              description: "Strong, quoted document version."
+              schema: {"type": "string", "example": "\"1\""}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/Document"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "409": {"$ref": "#/components/responses/Conflict"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+    delete:
+      operationId: "deleteDocument"
+      summary: "Delete a Markdown document"
+      security:
+        - {"BearerAuth": []}
+      parameters:
+        - {"$ref": "#/components/parameters/IfMatch"}
+      responses:
+        "204":
+          description: "No content"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "409": {"$ref": "#/components/responses/Conflict"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+  "/api/v1/projects/{id}/search":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+    get:
+      operationId: "searchProject"
+      summary: "Search active Git snapshots and Markdown documents"
+      security:
+        - {"BearerAuth": []}
+      parameters:
+        - {"name": "q", "in": "query", "required": true, "schema": {"type": "string", "minLength": 1}}
+        - {"name": "source_type", "in": "query", "schema": {"type": "array", "items": {"type": "string", "enum": ["local_git", "github", "document"]}}, "style": "form", "explode": true, "description": "Repeat this parameter or supply comma-separated source types."}
+        - {"name": "repository_id", "in": "query", "schema": {"type": "string", "format": "uuid"}}
+        - {"name": "path_prefix", "in": "query", "schema": {"type": "string"}}
+        - {"$ref": "#/components/parameters/Limit"}
+        - {"$ref": "#/components/parameters/Offset"}
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+            X-Search-Cache:
+              description: "Cache outcome."
+              schema: {"type": "string", "enum": ["hit", "miss", "bypass", "degraded"]}
+            X-Search-Version:
+              description: "Project search version for cache invalidation."
+              schema: {"type": "integer", "format": "int64"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/SearchResult"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+  "/api/v1/jobs":
+    get:
+      operationId: "listJobs"
+      summary: "List jobs"
+      security:
+        - {"BearerAuth": []}
+      parameters:
+        - {"$ref": "#/components/parameters/Limit"}
+        - {"$ref": "#/components/parameters/Offset"}
+        - {"name": "status", "in": "query", "schema": {"$ref": "#/components/schemas/JobStatus"}}
+        - {"name": "type", "in": "query", "schema": {"type": "string"}}
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/JobListResult"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+    post:
+      operationId: "enqueueJob"
+      summary: "Enqueue a job"
+      security:
+        - {"BearerAuth": []}
+      description: "repository.sync jobs take a project_id and repository_id in payload, with an optional ref."
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema: {"$ref": "#/components/schemas/JobInput"}
+      responses:
+        "202":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/Job"}
+        "200":
+          description: "Existing job returned for the idempotency key"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/Job"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "409": {"$ref": "#/components/responses/Conflict"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+  "/api/v1/jobs/{id}":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+    get:
+      operationId: "getJob"
+      summary: "Get job status and results"
+      security:
+        - {"BearerAuth": []}
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/Job"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+  "/api/v1/jobs/{id}/cancel":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+    post:
+      operationId: "cancelJob"
+      summary: "Cancel a pending or running job"
+      security:
+        - {"BearerAuth": []}
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/Job"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "409": {"$ref": "#/components/responses/Conflict"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+components:
+  securitySchemes:
+    BearerAuth:
+      type: "http"
+      scheme: "bearer"
+  parameters:
+    id:
+      name: "id"
+      in: "path"
+      required: true
+      schema: {"type": "string", "format": "uuid"}
+    repoId:
+      name: "repoId"
+      in: "path"
+      required: true
+      schema: {"type": "string", "format": "uuid"}
+    docId:
+      name: "docId"
+      in: "path"
+      required: true
+      schema: {"type": "string", "format": "uuid"}
+    Limit:
+      name: "limit"
+      in: "query"
+      schema: {"type": "integer", "minimum": 1}
+    Offset:
+      name: "offset"
+      in: "query"
+      schema: {"type": "integer", "minimum": 0}
+    IfMatch:
+      name: "If-Match"
+      in: "header"
+      description: "Document version. Accepts a quoted number, a weak ETag or an unquoted number. For PUT and PATCH use this or the body version. If both are supplied they must match. Optional on DELETE."
+      schema: {"type": "string", "example": "\"1\""}
+  responses:
+    BadRequest:
+      description: "Invalid request"
+      headers:
+        X-Request-ID:
+          description: "Request correlation ID."
+          schema: {"type": "string"}
+      content:
+        "application/json":
+          schema: {"$ref": "#/components/schemas/Error"}
+          example:
+            error: "invalid request"
+            code: "invalid_input"
+    Unauthorized:
+      description: "Missing or invalid bearer token"
+      headers:
+        X-Request-ID:
+          description: "Request correlation ID."
+          schema: {"type": "string"}
+        WWW-Authenticate:
+          description: "Bearer challenge."
+          schema: {"type": "string", "example": "Bearer realm=\"ProjectLens\""}
+      content:
+        "application/json":
+          schema: {"$ref": "#/components/schemas/Error"}
+          example:
+            error: "missing or invalid bearer token"
+            code: "unauthorized"
+    Forbidden:
+      description: "Repository access forbidden"
+      headers:
+        X-Request-ID:
+          description: "Request correlation ID."
+          schema: {"type": "string"}
+      content:
+        "application/json":
+          schema: {"$ref": "#/components/schemas/Error"}
+          example:
+            error: "repository access forbidden"
+            code: "forbidden"
+    NotFound:
+      description: "Resource not found"
+      headers:
+        X-Request-ID:
+          description: "Request correlation ID."
+          schema: {"type": "string"}
+      content:
+        "application/json":
+          schema: {"$ref": "#/components/schemas/Error"}
+          example:
+            error: "resource not found"
+            code: "not_found"
+    Conflict:
+      description: "Resource or document version conflict"
+      headers:
+        X-Request-ID:
+          description: "Request correlation ID."
+          schema: {"type": "string"}
+      content:
+        "application/json":
+          schema: {"$ref": "#/components/schemas/Error"}
+          example:
+            error: "resource or document version conflict"
+            code: "conflict"
+    PayloadTooLarge:
+      description: "HTTP payload exceeds the configured size limit"
+      headers:
+        X-Request-ID:
+          description: "Request correlation ID."
+          schema: {"type": "string"}
+      content:
+        "application/json":
+          schema: {"$ref": "#/components/schemas/Error"}
+          example:
+            error: "http payload or document exceeds the configured limit"
+            code: "payload_too_large"
+    RateLimited:
+      description: "Upstream rate limit exceeded"
+      headers:
+        X-Request-ID:
+          description: "Request correlation ID."
+          schema: {"type": "string"}
+      content:
+        "application/json":
+          schema: {"$ref": "#/components/schemas/Error"}
+          example:
+            error: "upstream rate limit exceeded"
+            code: "rate_limited"
+    InternalError:
+      description: "Internal server error"
+      headers:
+        X-Request-ID:
+          description: "Request correlation ID."
+          schema: {"type": "string"}
+      content:
+        "application/json":
+          schema: {"$ref": "#/components/schemas/Error"}
+          example:
+            error: "internal server error"
+            code: "internal_error"
+    BadGateway:
+      description: "Upstream service unavailable"
+      headers:
+        X-Request-ID:
+          description: "Request correlation ID."
+          schema: {"type": "string"}
+      content:
+        "application/json":
+          schema: {"$ref": "#/components/schemas/Error"}
+          example:
+            error: "upstream service unavailable"
+            code: "upstream_error"
+    ServiceUnavailable:
+      description: "Server in-flight capacity exhausted"
+      headers:
+        X-Request-ID:
+          description: "Request correlation ID."
+          schema: {"type": "string"}
+        Retry-After:
+          description: "Seconds to wait before attempting another request."
+          schema: {"type": "integer", "example": 1}
+      content:
+        "application/json":
+          schema: {"$ref": "#/components/schemas/Error"}
+          example:
+            error: "server in-flight capacity exhausted"
+            code: "service_unavailable"
+    RequestTimeout:
+      description: "Request deadline exceeded"
+      headers:
+        X-Request-ID:
+          description: "Request correlation ID."
+          schema: {"type": "string"}
+      content:
+        "application/json":
+          schema: {"$ref": "#/components/schemas/Error"}
+          example:
+            error: "request deadline exceeded"
+            code: "request_timeout"
+  schemas:
+    Error:
+      type: "object"
+      required: ["error", "code"]
+      properties:
+        error: {"type": "string"}
+        code: {"type": "string"}
+        request_id: {"type": "string"}
+    Health:
+      type: "object"
+      required: ["status", "service", "env", "version", "timestamp", "uptime"]
+      properties:
+        status: {"type": "string"}
+        service: {"type": "string"}
+        env: {"type": "string"}
+        version: {"type": "string"}
+        timestamp: {"type": "string", "format": "date-time"}
+        uptime: {"type": "string"}
+    Readiness:
+      type: "object"
+      required: ["status", "checks"]
+      properties:
+        status: {"type": "string", "enum": ["ok", "unavailable"]}
+        checks:
+          type: "object"
+          required: ["postgres", "redis"]
+          properties:
+            postgres: {"type": "string", "enum": ["ok", "unavailable"]}
+            redis: {"type": "string", "enum": ["ok", "degraded", "disabled"]}
+    YAMLSpecification: {"type": "string"}
+    JSONSpecification: {"type": "object", "additionalProperties": true}
+    Ping:
+      type: "object"
+      required: ["message"]
+      properties:
+        message: {"type": "string", "example": "pong"}
+    ProjectStatus: {"type": "string", "enum": ["active", "archived"]}
+    RepositorySourceType: {"type": "string", "enum": ["local_git", "github"]}
+    SnapshotStatus: {"type": "string", "enum": ["staging", "active", "superseded", "failed"]}
+    JobStatus: {"type": "string", "enum": ["pending", "running", "succeeded", "failed", "cancelled"]}
+    SearchHitKind: {"type": "string", "enum": ["source_file", "document"]}
+    SearchSourceType: {"type": "string", "enum": ["local_git", "github", "document"]}
+    SearchCacheStatus: {"type": "string", "enum": ["hit", "miss", "bypass", "degraded"]}
+    Job:
+      type: "object"
+      required: ["id", "type", "status", "payload", "attempt", "max_attempts", "timeout_seconds", "run_at", "created_at", "updated_at"]
+      properties:
+        id: {"type": "string", "format": "uuid"}
+        type: {"type": "string"}
+        status: {"$ref": "#/components/schemas/JobStatus"}
+        payload: {"type": "object", "additionalProperties": true}
+        result: {}
+        idempotency_key: {"type": "string"}
+        attempt: {"type": "integer"}
+        max_attempts: {"type": "integer"}
+        timeout_seconds: {"type": "integer"}
+        run_at: {"type": "string", "format": "date-time"}
+        locked_by: {"type": "string"}
+        lease_until: {"type": "string", "format": "date-time"}
+        cancel_requested_at: {"type": "string", "format": "date-time"}
+        last_error: {"type": "string"}
+        last_error_code: {"type": "string"}
+        started_at: {"type": "string", "format": "date-time"}
+        finished_at: {"type": "string", "format": "date-time"}
+        created_at: {"type": "string", "format": "date-time"}
+        updated_at: {"type": "string", "format": "date-time"}
+    JobInput:
+      type: "object"
+      required: ["type"]
+      properties:
+        type: {"type": "string"}
+        payload: {"type": "object", "additionalProperties": true}
+        idempotency_key: {"type": "string"}
+        max_attempts: {"type": "integer"}
+        timeout_seconds: {"type": "integer"}
+        run_at: {"type": "string", "format": "date-time"}
+      additionalProperties: false
+    JobListResult:
+      type: "object"
+      required: ["items", "total", "limit", "offset"]
+      properties:
+        items: {"type": "array", "items": {"$ref": "#/components/schemas/Job"}}
+        total: {"type": "integer", "format": "int64"}
+        limit: {"type": "integer"}
+        offset: {"type": "integer"}
+    SearchLocation:
+      type: "object"
+      required: ["api_path"]
+      properties:
+        repository_id: {"type": "string", "format": "uuid"}
+        repository_name: {"type": "string"}
+        repository_source: {"type": "string"}
+        snapshot_id: {"type": "string", "format": "uuid"}
+        snapshot_version: {"type": "integer", "format": "int64"}
+        commit_hash: {"type": "string"}
+        path: {"type": "string"}
+        url: {"type": "string"}
+        document_id: {"type": "string", "format": "uuid"}
+        document_title: {"type": "string"}
+        document_version: {"type": "integer", "format": "int64"}
+        line: {"type": "integer"}
+        api_path: {"type": "string"}
+    SearchHit:
+      type: "object"
+      required: ["kind", "source_type", "id", "project_id", "title", "snippet", "score", "updated_at", "location"]
+      properties:
+        kind: {"$ref": "#/components/schemas/SearchHitKind"}
+        source_type: {"$ref": "#/components/schemas/SearchSourceType"}
+        id: {"type": "string", "format": "uuid"}
+        project_id: {"type": "string", "format": "uuid"}
+        title: {"type": "string"}
+        snippet: {"type": "string"}
+        score: {"type": "number", "format": "double"}
+        updated_at: {"type": "string", "format": "date-time"}
+        location: {"$ref": "#/components/schemas/SearchLocation"}
+    SearchResult:
+      type: "object"
+      required: ["query", "items", "total", "limit", "offset", "search_version"]
+      properties:
+        query: {"type": "string"}
+        items: {"type": "array", "items": {"$ref": "#/components/schemas/SearchHit"}}
+        total: {"type": "integer", "format": "int64"}
+        limit: {"type": "integer"}
+        offset: {"type": "integer"}
+        search_version: {"type": "integer", "format": "int64"}
+        cache_status: {"$ref": "#/components/schemas/SearchCacheStatus"}
+    Document:
+      type: "object"
+      required: ["id", "project_id", "title", "content", "content_bytes", "version", "created_at", "updated_at"]
+      properties:
+        id: {"type": "string", "format": "uuid"}
+        project_id: {"type": "string", "format": "uuid"}
+        title: {"type": "string"}
+        content: {"type": "string"}
+        content_bytes: {"type": "integer", "format": "int64"}
+        version: {"type": "integer", "format": "int64"}
+        created_at: {"type": "string", "format": "date-time"}
+        updated_at: {"type": "string", "format": "date-time"}
+    DocumentSummary:
+      type: "object"
+      required: ["id", "project_id", "title", "content_bytes", "version", "created_at", "updated_at"]
+      properties:
+        id: {"type": "string", "format": "uuid"}
+        project_id: {"type": "string", "format": "uuid"}
+        title: {"type": "string"}
+        content_bytes: {"type": "integer", "format": "int64"}
+        version: {"type": "integer", "format": "int64"}
+        created_at: {"type": "string", "format": "date-time"}
+        updated_at: {"type": "string", "format": "date-time"}
+    DocumentInput:
+      type: "object"
+      required: ["title"]
+      properties:
+        title: {"type": "string"}
+        content: {"type": "string"}
+      additionalProperties: false
+    DocumentUpdate:
+      type: "object"
+      required: ["title"]
+      properties:
+        title: {"type": "string"}
+        content: {"type": "string"}
+        version: {"type": "integer", "minimum": 1}
+      additionalProperties: false
+    DocumentPatch:
+      type: "object"
+      properties:
+        title: {"type": "string"}
+        content: {"type": "string"}
+        version: {"type": "integer", "minimum": 1}
+      additionalProperties: false
+    DocumentListResult:
+      type: "object"
+      required: ["items", "total", "limit", "offset"]
+      properties:
+        items: {"type": "array", "items": {"$ref": "#/components/schemas/DocumentSummary"}}
+        total: {"type": "integer", "format": "int64"}
+        limit: {"type": "integer"}
+        offset: {"type": "integer"}
+    Project:
+      type: "object"
+      required: ["id", "slug", "name", "description", "status", "created_at", "updated_at"]
+      properties:
+        id: {"type": "string", "format": "uuid"}
+        slug: {"type": "string"}
+        name: {"type": "string"}
+        description: {"type": "string"}
+        status: {"$ref": "#/components/schemas/ProjectStatus"}
+        created_at: {"type": "string", "format": "date-time"}
+        updated_at: {"type": "string", "format": "date-time"}
+    ProjectInput:
+      type: "object"
+      required: ["slug", "name"]
+      properties:
+        slug: {"type": "string"}
+        name: {"type": "string"}
+        description: {"type": "string"}
+        status: {"$ref": "#/components/schemas/ProjectStatus"}
+      additionalProperties: false
+    ProjectReplace:
+      type: "object"
+      required: ["slug", "name", "status"]
+      properties:
+        slug: {"type": "string"}
+        name: {"type": "string"}
+        description: {"type": "string"}
+        status: {"$ref": "#/components/schemas/ProjectStatus"}
+      additionalProperties: false
+    ProjectPatch:
+      type: "object"
+      properties:
+        slug: {"type": "string"}
+        name: {"type": "string"}
+        description: {"type": "string"}
+        status: {"$ref": "#/components/schemas/ProjectStatus"}
+      additionalProperties: false
+    ProjectListResult:
+      type: "object"
+      required: ["items", "total", "limit", "offset"]
+      properties:
+        items: {"type": "array", "items": {"$ref": "#/components/schemas/Project"}}
+        total: {"type": "integer", "format": "int64"}
+        limit: {"type": "integer"}
+        offset: {"type": "integer"}
+    Snapshot:
+      type: "object"
+      required: ["id", "repository_id", "version", "status", "resolved_ref", "commit_hash", "tree_hash", "scanner_config_hash", "commit_author_name", "commit_author_email", "commit_authored_at", "commit_committer_name", "commit_committer_email", "commit_committed_at", "commit_subject", "commit_parents", "total_tree_entries", "included_files", "included_bytes", "skipped_files", "skipped_by_reason", "truncated", "added_files", "modified_files", "deleted_files", "unchanged_files", "blobs_read", "scanned_at", "created_at", "updated_at"]
+      properties:
+        id: {"type": "string", "format": "uuid"}
+        repository_id: {"type": "string", "format": "uuid"}
+        job_id: {"type": "string", "format": "uuid"}
+        parent_snapshot_id: {"type": "string", "format": "uuid"}
+        version: {"type": "integer", "format": "int64"}
+        status: {"$ref": "#/components/schemas/SnapshotStatus"}
+        resolved_ref: {"type": "string"}
+        commit_hash: {"type": "string"}
+        tree_hash: {"type": "string"}
+        scanner_config_hash: {"type": "string"}
+        commit_author_name: {"type": "string"}
+        commit_author_email: {"type": "string"}
+        commit_authored_at: {"type": "string", "format": "date-time"}
+        commit_committer_name: {"type": "string"}
+        commit_committer_email: {"type": "string"}
+        commit_committed_at: {"type": "string", "format": "date-time"}
+        commit_subject: {"type": "string"}
+        commit_parents: {"type": "array", "items": {"type": "string"}}
+        total_tree_entries: {"type": "integer"}
+        included_files: {"type": "integer"}
+        included_bytes: {"type": "integer", "format": "int64"}
+        skipped_files: {"type": "integer"}
+        skipped_by_reason: {"type": "object", "additionalProperties": {"type": "integer"}}
+        truncated: {"type": "boolean"}
+        added_files: {"type": "integer"}
+        modified_files: {"type": "integer"}
+        deleted_files: {"type": "integer"}
+        unchanged_files: {"type": "integer"}
+        blobs_read: {"type": "integer"}
+        error_message: {"type": "string"}
+        scanned_at: {"type": "string", "format": "date-time"}
+        published_at: {"type": "string", "format": "date-time"}
+        superseded_at: {"type": "string", "format": "date-time"}
+        created_at: {"type": "string", "format": "date-time"}
+        updated_at: {"type": "string", "format": "date-time"}
+    SourceFile:
+      type: "object"
+      required: ["id", "snapshot_id", "repository_id", "path", "blob_oid", "mode", "size_bytes", "sha256", "line_count", "is_executable", "created_at"]
+      properties:
+        id: {"type": "string", "format": "uuid"}
+        snapshot_id: {"type": "string", "format": "uuid"}
+        repository_id: {"type": "string", "format": "uuid"}
+        path: {"type": "string"}
+        blob_oid: {"type": "string"}
+        mode: {"type": "string"}
+        size_bytes: {"type": "integer", "format": "int64"}
+        sha256: {"type": "string"}
+        line_count: {"type": "integer"}
+        is_executable: {"type": "boolean"}
+        content: {"type": "string"}
+        created_at: {"type": "string", "format": "date-time"}
+    SnapshotListResult:
+      type: "object"
+      required: ["items", "total", "limit", "offset"]
+      properties:
+        items: {"type": "array", "items": {"$ref": "#/components/schemas/Snapshot"}}
+        total: {"type": "integer", "format": "int64"}
+        limit: {"type": "integer"}
+        offset: {"type": "integer"}
+    SourceFileListResult:
+      type: "object"
+      required: ["items", "total", "limit", "offset"]
+      properties:
+        items: {"type": "array", "items": {"$ref": "#/components/schemas/SourceFile"}}
+        total: {"type": "integer", "format": "int64"}
+        limit: {"type": "integer"}
+        offset: {"type": "integer"}
+    Repository:
+      type: "object"
+      required: ["id", "project_id", "source_type", "name", "source", "canonical_source", "default_branch", "description", "created_at", "updated_at"]
+      properties:
+        id: {"type": "string", "format": "uuid"}
+        project_id: {"type": "string", "format": "uuid"}
+        source_type: {"$ref": "#/components/schemas/RepositorySourceType"}
+        name: {"type": "string"}
+        source: {"type": "string"}
+        canonical_source: {"type": "string"}
+        default_branch: {"type": "string"}
+        description: {"type": "string"}
+        remote_url: {"type": "string"}
+        local_path: {"type": "string"}
+        github_owner: {"type": "string"}
+        github_repo: {"type": "string"}
+        github_repo_id: {"type": "integer", "format": "int64"}
+        github_visibility: {"type": "string"}
+        github_stars: {"type": "integer"}
+        github_language: {"type": "string"}
+        last_synced_at: {"type": "string", "format": "date-time"}
+        created_at: {"type": "string", "format": "date-time"}
+        updated_at: {"type": "string", "format": "date-time"}
+    RepositoryInput:
+      type: "object"
+      required: ["source_type", "source"]
+      properties:
+        source_type: {"$ref": "#/components/schemas/RepositorySourceType"}
+        source:
+          type: "string"
+          description: "Absolute Git work tree path under an allowed root, or a public https://github.com/<owner>/<repo> URL."
+        name: {"type": "string"}
+        description: {"type": "string"}
+      additionalProperties: false
+    RepositoryPatch:
+      type: "object"
+      properties:
+        name: {"type": "string"}
+        description: {"type": "string"}
+      additionalProperties: false
+    RepositoryListResult:
+      type: "object"
+      required: ["items", "total", "limit", "offset"]
+      properties:
+        items: {"type": "array", "items": {"$ref": "#/components/schemas/Repository"}}
+        total: {"type": "integer", "format": "int64"}
+        limit: {"type": "integer"}
+        offset: {"type": "integer"}

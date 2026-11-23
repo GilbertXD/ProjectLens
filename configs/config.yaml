@@ -6,10 +6,19 @@ app:
 server:
   host: "0.0.0.0"
   port: 8080
+  read_header_timeout: 5s
+  request_timeout: 8s
+  max_header_bytes: 65536
+  max_body_bytes: 4194304
+  max_in_flight: 128
   read_timeout: 5s
   write_timeout: 10s
   idle_timeout: 60s
   shutdown_timeout: 10s
+
+auth:
+  enabled: false
+  bearer_tokens: []
 
 log:
   level: info
@@ -18,7 +27,7 @@ log:
 cors:
   allowed_origins: []
   allowed_methods: [GET, POST, PUT, PATCH, DELETE, OPTIONS]
-  allowed_headers: [Content-Type, X-Request-ID]
+  allowed_headers: [Authorization, Content-Type, X-Request-ID]
 
 database:
   dsn: postgres://projectlens:projectlens@localhost:5432/projectlens?sslmode=disable
@@ -34,6 +43,7 @@ repository:
   allowed_local_roots: []
 
 github:
+  git_base_url: ""
   api_base_url: https://api.github.com
   token: ""
   timeout: 10s

@@ -14,13 +14,14 @@ func Recovery(log *slog.Logger) gin.HandlerFunc {
 			if value := recover(); value != nil {
 				id := GetRequestID(c)
 				log.ErrorContext(c.Request.Context(), "http panic",
-					"panic", value, "stack", string(debug.Stack()), "request_id", id)
+					"stack", string(debug.Stack()), "request_id", id)
 				if c.Writer.Written() {
 					c.Abort()
 					return
 				}
 				c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
 					"error":      "internal server error",
+					"code":       "internal_error",
 					"request_id": id,
 				})
 			}

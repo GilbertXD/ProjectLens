@@ -33,7 +33,7 @@ type Scanner struct {
 
 func NewScanner(cfg config.ScannerConfig, repository config.RepositoryConfig, github config.GitHubConfig) *Scanner {
 	cfg.ExcludePatterns = slices.Clone(cfg.ExcludePatterns)
-	return &Scanner{cfg: cfg, local: NewLocalSource(repository.AllowedLocalRoots), remote: NewRemoteSource(cfg.CacheDir, github.Token)}
+	return &Scanner{cfg: cfg, local: NewLocalSource(repository.AllowedLocalRoots), remote: NewRemoteSource(cfg.CacheDir, github.Token, github.GitBaseURL)}
 }
 
 func (s *Scanner) prepare(ctx context.Context, spec SourceSpec) (*PreparedRepo, error) {

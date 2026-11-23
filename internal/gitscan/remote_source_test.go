@@ -34,15 +34,19 @@ func TestRemoteManifestParity(t *testing.T) {
 	}
 	fixtureGit(t, dir, "clone", "--bare", dir, bare)
 	fixtureGit(t, bare, "update-server-info")
-	server := httptest.NewServer(http.FileServer(http.Dir(web)))
+	files := http.FileServer(http.Dir(web))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			t.Error("GitHub credentials reached the mirror")
+		}
+		files.ServeHTTP(w, r)
+	}))
 	defer server.Close()
 
 	cfg := config.DefaultScannerConfig()
 	cfg.CacheDir = t.TempDir()
-	scanner := localScanner(dir, cfg)
-	remoteSource := NewRemoteSource(cfg.CacheDir, "")
-	remoteSource.testHTTPBase = server.URL
-	scanner.remote = remoteSource
+	scanner := NewScanner(cfg, config.RepositoryConfig{AllowedLocalRoots: []string{dir}},
+		config.GitHubConfig{GitBaseURL: server.URL, Token: "must-stay-on-github"})
 	options := ScanOptions{IncludeContent: true}
 	local, err := scanner.Scan(t.Context(), SourceSpec{SourceType: domain.RepositorySourceLocalGit, Source: dir}, options)
 	if err != nil {
@@ -84,7 +88,7 @@ func TestRemoteManifestParity(t *testing.T) {
 }
 
 func TestRemoteRejectsNonGitHubSources(t *testing.T) {
-	source := NewRemoteSource(t.TempDir(), "")
+	source := NewRemoteSource(t.TempDir(), "", "http://mirror.example")
 	for _, raw := range []string{"http://github.com/a/b", "https://user:secret@github.com/a/b", "https://github.com.example/a/b", "file:///tmp/test"} {
 		if _, err := source.Prepare(t.Context(), SourceSpec{Source: raw}); !errors.Is(err, domain.ErrInvalidInput) {
 			t.Errorf("validating %q: %v", raw, err)

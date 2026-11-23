@@ -53,17 +53,25 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	log := logger.New(cfg.Log, stdout)
+	log.Info("worker starting", "env", cfg.App.Env, "version", cfg.App.Version,
+		"worker_mode", cfg.Worker.Mode, "database_target", logger.RedactDSN(cfg.Database.DSN),
+		"auth_enabled", cfg.Auth.Enabled, "auth_token_count", len(cfg.Auth.BearerTokens),
+		"concurrency", cfg.Worker.Concurrency, "lease_duration", cfg.Worker.LeaseDuration)
+	defer log.Info("worker stopped")
+	if cfg.App.Env == "production" && !cfg.Auth.Enabled {
+		log.Warn("API authentication is disabled in production", "auth_enabled", false)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	pool, err := db.NewPool(ctx, cfg.Database)
 	if err != nil {
-		fmt.Fprintf(stderr, "initialize database: %v\n", err)
+		log.Error("initialize database failed", "database_target", logger.RedactDSN(cfg.Database.DSN))
 		return 1
 	}
 	defer pool.Close()
 	if cfg.Database.AutoMigrate {
 		if err := db.MigrateUp(ctx, pool); err != nil {
-			fmt.Fprintf(stderr, "migrate database: %v\n", err)
+			log.Error("migrate database failed")
 			return 1
 		}
 	}

@@ -122,3 +122,20 @@ func TestServeAndGracefulShutdown(t *testing.T) {
 		t.Fatal("server still accepts connections after shutdown")
 	}
 }
+
+func TestHTTPServerLimits(t *testing.T) {
+	cfg := config.Config{Server: config.ServerConfig{
+		Host: "::1", Port: 8080, ReadHeaderTimeout: 2 * time.Second, ReadTimeout: 5 * time.Second,
+		RequestTimeout: 7 * time.Second, WriteTimeout: 9 * time.Second, IdleTimeout: time.Minute,
+		ShutdownTimeout: 10 * time.Second, MaxHeaderBytes: 65536,
+	}}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	server := New(cfg, log, http.NotFoundHandler())
+	httpServer := server.http
+	if server.Addr() != "[::1]:8080" || httpServer.ReadHeaderTimeout != cfg.Server.ReadHeaderTimeout ||
+		httpServer.ReadTimeout != cfg.Server.ReadTimeout || httpServer.WriteTimeout != cfg.Server.WriteTimeout ||
+		httpServer.IdleTimeout != cfg.Server.IdleTimeout || httpServer.MaxHeaderBytes != cfg.Server.MaxHeaderBytes ||
+		server.shutdownTimeout != cfg.Server.ShutdownTimeout {
+		t.Fatal("configured HTTP settings were not applied")
+	}
+}

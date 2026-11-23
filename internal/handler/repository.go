@@ -50,9 +50,15 @@ func decodeRepository[T any](c *gin.Context) (T, error) {
 	decoder := json.NewDecoder(c.Request.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&input); err != nil || input == nil {
+		if cause := requestLimitCause(c, err); cause != nil {
+			return zero, cause
+		}
 		return zero, fmt.Errorf("%w: body must be a valid repository JSON object", domain.ErrInvalidInput)
 	}
 	if err := decoder.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
+		if cause := requestLimitCause(c, err); cause != nil {
+			return zero, cause
+		}
 		return zero, fmt.Errorf("%w: body must contain a single JSON value", domain.ErrInvalidInput)
 	}
 	return *input, nil
@@ -128,6 +134,9 @@ func (h *RepositoryHandler) respond(c *gin.Context, status int, body any, err er
 }
 
 func (h *RepositoryHandler) writeError(c *gin.Context, err error) {
+	if writeRequestLimitError(c, err) {
+		return
+	}
 	for _, mapping := range []struct {
 		err    error
 		status int

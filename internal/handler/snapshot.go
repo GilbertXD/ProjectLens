@@ -91,6 +91,9 @@ func (h *SnapshotHandler) fileContent(c *gin.Context) {
 }
 
 func (h *SnapshotHandler) respond(c *gin.Context, result any, err error) {
+	if err != nil && writeRequestLimitError(c, err) {
+		return
+	}
 	switch {
 	case err == nil:
 		c.JSON(http.StatusOK, result)

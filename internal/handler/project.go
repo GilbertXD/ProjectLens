@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"projectlens/internal/domain"
+	"projectlens/internal/middleware"
 )
 
 type ProjectService interface {
@@ -48,9 +49,15 @@ func decodeProject[T any](c *gin.Context) (T, error) {
 	decoder := json.NewDecoder(c.Request.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&input); err != nil || input == nil {
+		if cause := requestLimitCause(c, err); cause != nil {
+			return zero, cause
+		}
 		return zero, fmt.Errorf("%w: body must be a valid project JSON object", domain.ErrInvalidInput)
 	}
 	if err := decoder.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
+		if cause := requestLimitCause(c, err); cause != nil {
+			return zero, cause
+		}
 		return zero, fmt.Errorf("%w: body must contain a single JSON value", domain.ErrInvalidInput)
 	}
 	return *input, nil
@@ -133,6 +140,9 @@ func (h *ProjectHandler) respond(c *gin.Context, status int, body any, err error
 }
 
 func (h *ProjectHandler) writeError(c *gin.Context, err error) {
+	if writeRequestLimitError(c, err) {
+		return
+	}
 	switch {
 	case errors.Is(err, domain.ErrInvalidInput):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "invalid_input"})
@@ -144,4 +154,30 @@ func (h *ProjectHandler) writeError(c *gin.Context, err error) {
 		h.log.ErrorContext(c.Request.Context(), "project request failed", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error", "code": "internal_error"})
 	}
+}
+
+// Preserve limit and timeout errors before replacing JSON decoding errors with
+// generic messages that cannot echo user-supplied body values.
+func requestLimitCause(c *gin.Context, err error) error {
+	var tooLarge *http.MaxBytesError
+	switch {
+	case errors.As(err, &tooLarge):
+		return tooLarge
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(c.Request.Context().Err(), context.DeadlineExceeded):
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+func writeRequestLimitError(c *gin.Context, err error) bool {
+	switch cause := requestLimitCause(c, err); cause {
+	case nil:
+		return false
+	case context.DeadlineExceeded:
+		c.JSON(http.StatusGatewayTimeout, gin.H{"error": "request timed out", "code": "request_timeout", "request_id": middleware.GetRequestID(c)})
+	default:
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "payload too large", "code": "payload_too_large", "request_id": middleware.GetRequestID(c)})
+	}
+	return true
 }

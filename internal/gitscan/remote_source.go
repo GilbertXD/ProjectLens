@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,17 +18,16 @@ import (
 )
 
 type RemoteSource struct {
-	cacheDir string
-	token    string
-	// Tests can route a validated GitHub URL to a hermetic HTTP fixture.
-	testHTTPBase string
+	cacheDir   string
+	token      string
+	gitBaseURL string
 }
 
-func NewRemoteSource(cacheDir, token string) *RemoteSource {
+func NewRemoteSource(cacheDir, token, gitBaseURL string) *RemoteSource {
 	if cacheDir == "" {
 		cacheDir = filepath.Join(os.TempDir(), "projectlens-git-cache")
 	}
-	return &RemoteSource{cacheDir: cacheDir, token: token}
+	return &RemoteSource{cacheDir: cacheDir, token: token, gitBaseURL: gitBaseURL}
 }
 
 // Lock the same cache entry across goroutines and separate worker processes.
@@ -70,9 +70,15 @@ func (s *RemoteSource) Prepare(ctx context.Context, spec SourceSpec) (*PreparedR
 	repoPath := "/" + strings.ToLower(owner+"/"+name)
 	canonical := "https://github.com" + repoPath
 	cloneURL := canonical + ".git"
-	git := gitRunner{token: s.token, testHTTP: s.testHTTPBase != ""}
-	if git.testHTTP {
-		cloneURL = strings.TrimRight(s.testHTTPBase, "/") + repoPath + ".git"
+	git := gitRunner{token: s.token}
+	if s.gitBaseURL != "" {
+		base, err := url.Parse(s.gitBaseURL)
+		if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Hostname() == "" {
+			return nil, errors.New("invalid Git mirror base URL")
+		}
+		cloneURL = base.JoinPath(repoPath + ".git").String()
+		// GitHub credentials are scoped to github.com. Mirrors receive no token.
+		git = gitRunner{allowHTTP: base.Scheme == "http"}
 	}
 	if err := os.MkdirAll(s.cacheDir, 0700); err != nil {
 		return nil, err
@@ -117,7 +123,7 @@ func (s *RemoteSource) Prepare(ctx context.Context, spec SourceSpec) (*PreparedR
 	}
 
 	// Credentials may grant private access. Verify public visibility without them.
-	if s.token != "" && !git.testHTTP {
+	if git.token != "" {
 		if _, err := git.run(ctx, 8192, false, "ls-remote", "--", cloneURL, "HEAD"); err != nil {
 			return nil, remoteError(err)
 		}

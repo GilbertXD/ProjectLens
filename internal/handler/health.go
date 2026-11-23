@@ -29,12 +29,26 @@ type Pinger interface {
 	Ping(context.Context) error
 }
 
-func ReadyHandler(pinger Pinger) gin.HandlerFunc {
+type CachePinger interface {
+	Ping(context.Context) error
+}
+
+// The cache is optional. PostgreSQL determines the readiness status.
+func ReadyHandler(pinger Pinger, cachePinger ...CachePinger) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if pinger != nil && pinger.Ping(c.Request.Context()) != nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable"})
-			return
+		checks := gin.H{"postgres": "ok", "redis": "disabled"}
+		status, httpStatus := "ok", http.StatusOK
+		ctx := c.Request.Context()
+		if pinger != nil && pinger.Ping(ctx) != nil {
+			checks["postgres"] = "unavailable"
+			status, httpStatus = "unavailable", http.StatusServiceUnavailable
 		}
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		if len(cachePinger) > 0 && cachePinger[0] != nil {
+			checks["redis"] = "ok"
+			if cachePinger[0].Ping(ctx) != nil {
+				checks["redis"] = "degraded"
+			}
+		}
+		c.JSON(httpStatus, gin.H{"status": status, "checks": checks})
 	}
 }

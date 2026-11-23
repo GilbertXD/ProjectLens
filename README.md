@@ -2,40 +2,72 @@
 
 ProjectLens is a Go 1.25 HTTP service built with Gin.
 
+## Quickstart with Docker Compose
+
+From a clean checkout with Docker and the Compose plugin, start the API, PostgreSQL, Redis, and the embedded worker. Compose accepts shell overrides and works without an environment file.
+
+```sh
+docker compose --env-file /dev/null up --build -d
+curl -fsS http://localhost:8080/healthz
+curl -fsS http://localhost:8080/readyz
+export PROJECTLENS_TOKEN=projectlens-dev-token
+curl -fsS -H "Authorization: Bearer $PROJECTLENS_TOKEN" http://localhost:8080/api/v1/ping
+```
+
+Compose enables authentication and uses a public development token and database password. Configure production credentials, TLS, and port exposure before opening access. Stop the stack with `make docker-down`. The named PostgreSQL volume retains application data.
+
 ## Run locally
 
-Start PostgreSQL and configure the database connection as described below. Start the server, then run the `curl` commands from another terminal.
+Start PostgreSQL and Redis with `docker compose up -d postgres redis`, or configure existing instances with `DATABASE_URL` and `REDIS_ADDR`. In a terminal with Go and Git installed, run `make run`. Local binaries default to authentication disabled. To use the authenticated examples below, start the server with credentials.
 
 ```sh
+export PROJECTLENS_TOKEN="$(openssl rand -hex 32)"
+export AUTH_ENABLED=true AUTH_BEARER_TOKENS="$PROJECTLENS_TOKEN"
 make run
-curl -fsS http://localhost:8080/healthz
-curl -fsS http://localhost:8080/api/v1/ping
 ```
 
-`GET /healthz` reports service metadata, the current UTC timestamp, and uptime as a Go duration string. `GET /api/v1/ping` returns `{"message":"pong"}`. Send `SIGINT` or `SIGTERM` to shut down gracefully.
+The server loads built-in defaults, then YAML, then environment variables. Select a YAML file with `-config` or `APP_CONFIG_FILE`. The server uses `configs/config.yaml` when present and no path is specified. Send Ctrl-C or SIGTERM for graceful shutdown.
 
-The service starts with built-in defaults and applies a YAML file followed by environment overrides. Select the file with `-config`, which takes precedence over `APP_CONFIG_FILE`. When neither is set, the server uses `configs/config.yaml` if present. An explicitly selected file must exist. See `.env.example` for all supported environment variables. For local runs, export the variables in your shell. To enable CORS, set `CORS_ALLOWED_ORIGINS` to a comma-separated list or `*`.
+| Setting | Purpose |
+| --- | --- |
+| `AUTH_ENABLED`, `AUTH_BEARER_TOKENS` | API authentication and comma-separated tokens for rotation |
+| `API_PORT`, `SERVER_HOST`, `SERVER_PORT` | Compose host port and the local binary's listen address |
+| `SERVER_READ_HEADER_TIMEOUT`, `SERVER_READ_TIMEOUT`, `SERVER_WRITE_TIMEOUT`, `SERVER_IDLE_TIMEOUT`, `SERVER_REQUEST_TIMEOUT` | HTTP timeouts and request deadline |
+| `SERVER_MAX_HEADER_BYTES`, `SERVER_MAX_BODY_BYTES`, `SERVER_MAX_IN_FLIGHT` | HTTP header, payload, and concurrent request limits |
+| `DATABASE_URL`, `DB_AUTO_MIGRATE`, `DB_MAX_CONNS` | PostgreSQL connection, migration policy, and pool size |
+| `REDIS_ENABLED`, `REDIS_ADDR`, `REDIS_PASSWORD`, `SEARCH_CACHE_TTL` | Optional search cache |
+| `REPO_ALLOWED_LOCAL_ROOTS`, `SCANNER_*` | Allowed local Git paths and scan limits |
+| `GITHUB_API_BASE_URL`, `GITHUB_GIT_BASE_URL` | Operator-configured GitHub metadata endpoint and optional Git mirror |
+| `CORS_ALLOWED_ORIGINS`, `LOG_LEVEL`, `LOG_FORMAT`, `WORKER_MODE` | Browser origins, logging, and worker topology |
 
-## Run with Docker Compose
+See [.env.example](.env.example) for the full set of local settings and [the operations runbook](docs/OPERATIONS.md) for production deployment, migration and rotation, diagnostics, and recovery.
+
+## API authentication and OpenAPI
+
+Send one `Authorization: Bearer <token>` header on `/api/v1/*` requests when authentication is enabled. Missing or invalid credentials return `401 unauthorized` with a Bearer challenge. Configure more than one token during rotation to keep old clients working while they switch. CORS preflight and the health, readiness, and OpenAPI endpoints are public.
 
 ```sh
-make docker-up
-curl -fsS http://localhost:8080/healthz
-make docker-down
+curl -fsS http://localhost:8080/openapi.yaml
+curl -fsS http://localhost:8080/openapi.json
 ```
 
-Compose publishes port 8080 and defaults to production mode with JSON logs. It reads supported overrides from the shell or a local `.env` file.
+Both endpoints serve the embedded OpenAPI 3.0.3 contract. Use either format to explore routes, request bodies, and response schemas.
 
 ## Verify
 
 ```sh
 make vet test build
+export TEST_DATABASE_URL='postgres://projectlens:projectlens@localhost:5432/projectlens?sslmode=disable'
+make test-integration test-e2e
 docker compose config -q
+make docker-e2e
 ```
+
+Database tests use a dedicated schema per test and need a PostgreSQL account that can create schemas. The delivery test starts isolated Redis and GitHub fixtures. The Docker E2E requires Docker Compose, curl, jq, OpenSSL, and access to any build dependencies and images missing locally. It allocates ports and volumes under an isolated project, exercises real API and worker containers, then tears the project down.
 
 ## Projects API
 
-The server requires PostgreSQL. For a Go process on the host, provision a database matching `DATABASE_URL` in `.env.example` or export a DSN for an existing database. Compose starts its own PostgreSQL instance and stores data in the named `postgres_data` volume. `GET /readyz` reports database connectivity, and `GET /healthz` continues to report process health.
+The server requires PostgreSQL. For a Go process on the host, provision a database matching `DATABASE_URL` in `.env.example` or export a DSN for an existing database. Compose starts PostgreSQL and stores application data in the named `postgres_data` volume.
 
 The server applies embedded migrations on startup by default. Set `DB_AUTO_MIGRATE=false` if you apply migrations separately using `make migrate-up`. Use `make migrate-status` to inspect migration state. `make migrate-down` rolls back one migration at a time. From the latest version, rollbacks remove unified search first, then drop documents, source files and snapshots, jobs, repositories, and finally projects and project audit logs.
 
@@ -52,11 +84,10 @@ Use `slug`, `name`, `description`, and `status` in JSON request bodies. Status i
 
 ```sh
 curl -fsS http://localhost:8080/api/v1/projects \
+  -H "Authorization: Bearer $PROJECTLENS_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"slug":"example-project","name":"Example Project"}'
 ```
-
-Set `TEST_DATABASE_URL` to a PostgreSQL database where the test user can create schemas, then run `make test-integration`. Each test creates and drops its own schema. With the variable unset, the PostgreSQL tests skip.
 
 ## Unified Search API
 
@@ -64,6 +95,7 @@ Search a project's active local Git and GitHub snapshots and its standalone Mark
 
 ```sh
 curl -G "http://localhost:8080/api/v1/projects/$PROJECT_ID/search" \
+  -H "Authorization: Bearer $PROJECTLENS_TOKEN" \
   --data-urlencode 'q="connection pool" OR timeout' \
   --data-urlencode 'source_type=local_git,github,document' \
   --data-urlencode 'limit=20' \
@@ -77,7 +109,7 @@ curl -G "http://localhost:8080/api/v1/projects/$PROJECT_ID/search" \
 
 Each hit has a relevance score, a snippet with HTML-escaped text and `<mark>` highlights, and a `location.api_path` to fetch the full content. File locations include repository, snapshot, commit, and path information. GitHub hits include a link pinned to the indexed commit. Document locations include the document ID, title, and version. A content match includes its first matching line when available.
 
-Redis is enabled by default. Compose starts Redis, publishes port 6379 by default (`REDIS_PORT`), and connects the API to `redis:6379`. A server running on the host uses `localhost:6379` by default. If you use `.env.example` as a Compose environment file, set `REDIS_ADDR=redis:6379` for the container. Set `REDIS_ENABLED=false` to bypass the cache, or configure `REDIS_*` and `SEARCH_*` using the values in `.env.example`. Cached results expire after five minutes by default. Search reads the project's version from PostgreSQL so writes that change searchable content or provenance invalidate older results. Responses include `X-Search-Version` and `X-Search-Cache`, whose value is `hit`, `miss`, `bypass`, or `degraded`. Redis errors fall back to PostgreSQL, and readiness checks PostgreSQL.
+Redis is enabled by default. Compose starts Redis, publishes port 6379 by default (`REDIS_PORT`), and connects the API to `redis:6379`. A server running on the host uses `localhost:6379` by default. If you use `.env.example` as a Compose environment file, set `REDIS_ADDR=redis:6379` for the container. Set `REDIS_ENABLED=false` to bypass the cache, or configure `REDIS_*` and `SEARCH_*` using the values in `.env.example`. Cached results expire after five minutes by default. Search reads the project's version from PostgreSQL so writes that change searchable content or provenance invalidate older results. Responses include `X-Search-Version` and `X-Search-Cache`, whose value is `hit`, `miss`, `bypass`, or `degraded`. Redis errors fall back to PostgreSQL and are reported as `checks.redis=degraded` at `/readyz`.
 
 With `TEST_DATABASE_URL` set, the search integration tests use an in-process Redis server by default. Set `TEST_REDIS_URL` to exercise caching against an external Redis instance. Outage and recovery tests use their own isolated Redis server.
 
@@ -100,11 +132,12 @@ New documents start at version 1. Successful creates, reads of a single document
 
 ```sh
 curl -X PATCH "$BASE/$DOCUMENT_ID" \
+  -H "Authorization: Bearer $PROJECTLENS_TOKEN" \
   -H 'Content-Type: application/json' -H 'If-Match: "1"' \
   -d '{"content":"# Updated notes"}'
 ```
 
-Titles are trimmed and must contain 1 to 200 characters. Markdown content may be empty. Set `document.max_content_bytes` in YAML or override it with `DOCUMENT_MAX_CONTENT_BYTES`. The default and PostgreSQL ceiling are 1,048,576 UTF-8 bytes (1 MiB). Documents report the byte count as `content_bytes`. Decoded content over the configured limit returns `400 invalid_input`. The API also limits raw JSON request size to the greater of 256 KiB and twice the content limit plus 64 KiB. Requests above that raw limit return `413 payload_too_large`.
+Titles are trimmed and must contain 1 to 200 characters. Markdown content may be empty. Set `document.max_content_bytes` in YAML or override it with `DOCUMENT_MAX_CONTENT_BYTES`. The default and PostgreSQL ceiling are 1,048,576 UTF-8 bytes (1 MiB). Documents report the byte count as `content_bytes`. Decoded content over the configured limit returns `400 invalid_input`. The API also limits raw JSON request size to the greater of 256 KiB and twice the content limit plus 64 KiB. Requests above the raw document limit or the global `SERVER_MAX_BODY_BYTES` cap return `413 payload_too_large`.
 
 ## Repository Association API
 
@@ -123,6 +156,7 @@ POST takes a `source_type` of `local_git` or `github`, a `source`, and optional 
 
 ```sh
 curl -fsS "http://localhost:8080/api/v1/projects/$PROJECT_ID/repositories" \
+  -H "Authorization: Bearer $PROJECTLENS_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"source_type":"github","source":"https://github.com/owner/repo"}'
 ```
@@ -167,6 +201,7 @@ WORKER_MODE=external docker compose --profile worker up --build -d
 
 ```sh
 curl -X POST http://localhost:8080/api/v1/jobs \
+  -H "Authorization: Bearer $PROJECTLENS_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"type":"mock.sleep","payload":{"duration_ms":1500},"idempotency_key":"demo-sleep"}'
 ```
@@ -179,14 +214,13 @@ The built-in types are `mock.echo` (optional `delay_ms`), `mock.sleep` (`duratio
 
 A worker renews its lease while an attempt runs. An expired lease lets another worker retry the job if attempts remain. A cancellation request takes precedence during recovery. Job handlers should honor context cancellation and make external side effects safe to repeat because a worker can lose its lease after performing work. The enqueue idempotency key deduplicates job creation.
 
-To run the PostgreSQL lifecycle, concurrency, and API integration tests, point `TEST_DATABASE_URL` at a PostgreSQL database whose user can create schemas and run `make test-integration`.
-
 ### Scan a repository
 
 Associate the repository with a project, then submit a scan through the jobs API.
 
 ```sh
 curl -X POST http://localhost:8080/api/v1/jobs \
+  -H "Authorization: Bearer $PROJECTLENS_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"type":"repository.scan","payload":{"project_id":"<project UUID>","repository_id":"<repository UUID>","ref":"main"}}'
 ```
@@ -216,6 +250,7 @@ Queue a `repository.sync` job for an associated repository to publish its scanne
 
 ```sh
 curl -X POST http://localhost:8080/api/v1/jobs \
+  -H "Authorization: Bearer $PROJECTLENS_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"type":"repository.sync","payload":{"project_id":"<project UUID>","repository_id":"<repository UUID>","ref":"main"}}'
 ```

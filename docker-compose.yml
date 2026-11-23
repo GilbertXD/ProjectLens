@@ -1,19 +1,46 @@
+x-app-build: &app-build
+  context: .
+  args:
+    GOPROXY: "${GOPROXY:-https://proxy.golang.org,direct}"
+
+x-runtime-defaults: &runtime-defaults
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
 services:
   api:
-    build: .
+    <<: *runtime-defaults
+    build: *app-build
+    mem_limit: 768m
+    cpus: 2.0
+    pids_limit: 256
+    volumes:
+      - scanner_cache:/var/cache/projectlens
     ports:
-      - "8080:8080"
+      - "${API_PORT:-8080}:8080"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_healthy
+        condition: service_started
     environment: &api-environment
       APP_NAME: "${APP_NAME:-ProjectLens}"
       APP_ENV: "${APP_ENV:-production}"
       APP_VERSION: "${APP_VERSION:-0.1.0}"
       SERVER_HOST: "0.0.0.0"
       SERVER_PORT: "8080"
+      AUTH_ENABLED: "${AUTH_ENABLED:-true}"
+      AUTH_BEARER_TOKENS: "${AUTH_BEARER_TOKENS:-projectlens-dev-token}"
+      SERVER_READ_HEADER_TIMEOUT: "${SERVER_READ_HEADER_TIMEOUT:-5s}"
+      SERVER_REQUEST_TIMEOUT: "${SERVER_REQUEST_TIMEOUT:-8s}"
+      SERVER_MAX_HEADER_BYTES: "${SERVER_MAX_HEADER_BYTES:-65536}"
+      SERVER_MAX_BODY_BYTES: "${SERVER_MAX_BODY_BYTES:-4194304}"
+      SERVER_MAX_IN_FLIGHT: "${SERVER_MAX_IN_FLIGHT:-128}"
       SERVER_READ_TIMEOUT: "${SERVER_READ_TIMEOUT:-5s}"
       SERVER_WRITE_TIMEOUT: "${SERVER_WRITE_TIMEOUT:-10s}"
       SERVER_IDLE_TIMEOUT: "${SERVER_IDLE_TIMEOUT:-60s}"
@@ -41,8 +68,9 @@ services:
       DB_HEALTH_CHECK_PERIOD: "${DB_HEALTH_CHECK_PERIOD:-1m}"
       DB_CONNECT_TIMEOUT: "${DB_CONNECT_TIMEOUT:-5s}"
       REPO_ALLOWED_LOCAL_ROOTS: "${REPO_ALLOWED_LOCAL_ROOTS:-}"
+      GITHUB_GIT_BASE_URL: "${GITHUB_GIT_BASE_URL:-}"
       GITHUB_API_BASE_URL: "${GITHUB_API_BASE_URL:-https://api.github.com}"
-      SCANNER_CACHE_DIR: "${SCANNER_CACHE_DIR:-}"
+      SCANNER_CACHE_DIR: "/var/cache/projectlens"
       SCANNER_GIT_TIMEOUT: "${SCANNER_GIT_TIMEOUT:-2m}"
       SCANNER_MAX_FILE_SIZE: "${SCANNER_MAX_FILE_SIZE:-1048576}"
       SCANNER_MAX_TOTAL_BYTES: "${SCANNER_MAX_TOTAL_BYTES:-52428800}"
@@ -68,7 +96,7 @@ services:
       WORKER_RETRY_BASE_DELAY: "${WORKER_RETRY_BASE_DELAY:-2s}"
       WORKER_RETRY_MAX_DELAY: "${WORKER_RETRY_MAX_DELAY:-1m}"
       WORKER_SHUTDOWN_TIMEOUT: "${WORKER_SHUTDOWN_TIMEOUT:-15s}"
-    stop_grace_period: "${WORKER_SHUTDOWN_TIMEOUT:-15s}"
+    stop_grace_period: "${API_STOP_GRACE_PERIOD:-30s}"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
       interval: 30s
@@ -77,8 +105,14 @@ services:
       retries: 3
 
   worker:
+    <<: *runtime-defaults
+    mem_limit: 768m
+    cpus: 2.0
+    pids_limit: 256
+    volumes:
+      - scanner_cache:/var/cache/projectlens
     profiles: ["worker"]
-    build: .
+    build: *app-build
     entrypoint: ["/app/worker"]
     command: ["-config", "/app/configs/config.yaml"]
     depends_on:
@@ -86,20 +120,43 @@ services:
         condition: service_healthy
     environment:
       <<: *api-environment
-    stop_grace_period: "${WORKER_SHUTDOWN_TIMEOUT:-15s}"
+    stop_grace_period: "${WORKER_STOP_GRACE_PERIOD:-20s}"
+    healthcheck:
+      disable: true
+
+  migrate:
+    <<: *runtime-defaults
+    restart: "no"
+    mem_limit: 256m
+    cpus: 1.0
+    pids_limit: 64
+    profiles: ["migrate"]
+    build: *app-build
+    entrypoint: ["/app/migrate"]
+    command: ["-config", "/app/configs/config.yaml", "up"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *api-environment
+      DB_AUTO_MIGRATE: "false"
     healthcheck:
       disable: true
 
   postgres:
+    <<: *runtime-defaults
+    mem_limit: 768m
+    cpus: 2.0
+    pids_limit: 256
     image: postgres:16-alpine
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     environment:
-      POSTGRES_USER: projectlens
-      POSTGRES_PASSWORD: projectlens
-      POSTGRES_DB: projectlens
+      POSTGRES_USER: "${POSTGRES_USER:-projectlens}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-projectlens}"
+      POSTGRES_DB: "${POSTGRES_DB:-projectlens}"
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "projectlens", "-d", "projectlens"]
+      test: ["CMD-SHELL", 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
       interval: 5s
       timeout: 3s
       retries: 10
@@ -107,6 +164,10 @@ services:
       - postgres_data:/var/lib/postgresql/data
 
   redis:
+    <<: *runtime-defaults
+    mem_limit: 256m
+    cpus: 1.0
+    pids_limit: 64
     image: redis:7-alpine
     user: redis
     ports:
@@ -133,3 +194,4 @@ services:
 
 volumes:
   postgres_data:
+  scanner_cache:

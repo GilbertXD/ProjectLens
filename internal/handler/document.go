@@ -58,9 +58,8 @@ func decodeDocument[T any](c *gin.Context, maxBodyBytes int64) (T, error) {
 	defer body.Close()
 	data, err := io.ReadAll(body)
 	if err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			return zero, err
+		if cause := requestLimitCause(c, err); cause != nil {
+			return zero, cause
 		}
 		return zero, fmt.Errorf("%w: cannot read request body", domain.ErrInvalidInput)
 	}
@@ -224,9 +223,11 @@ func (h *DocumentHandler) respond(c *gin.Context, status int, doc domain.Documen
 }
 
 func (h *DocumentHandler) writeError(c *gin.Context, err error) {
-	var tooLarge *http.MaxBytesError
+	if writeRequestLimitError(c, err) {
+		return
+	}
 	switch {
-	case errors.Is(err, domain.ErrPayloadTooLarge), errors.As(err, &tooLarge):
+	case errors.Is(err, domain.ErrPayloadTooLarge):
 		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": domain.ErrPayloadTooLarge.Error(), "code": "payload_too_large"})
 	case errors.Is(err, domain.ErrInvalidInput):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "invalid_input"})

@@ -4,3 +4,8 @@
 .env.*
 bin/
 coverage.out
+**/.DS_Store
+**/*.test
+docs/
+scripts/
+README.md

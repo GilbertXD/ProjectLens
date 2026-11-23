@@ -84,6 +84,7 @@ func TestLoadEnvOverrides(t *testing.T) {
 		"SERVER_PORT":             "8081",
 		"SERVER_READ_TIMEOUT":     "1s",
 		"SERVER_WRITE_TIMEOUT":    "2s",
+		"SERVER_REQUEST_TIMEOUT":  "1s",
 		"SERVER_IDLE_TIMEOUT":     "3s",
 		"SERVER_SHUTDOWN_TIMEOUT": "4s",
 		"LOG_LEVEL":               "warn",
@@ -98,6 +99,8 @@ func TestLoadEnvOverrides(t *testing.T) {
 		t.Fatalf("unexpected app or log config: %+v", cfg)
 	}
 	wantServer := ServerConfig{
+		ReadHeaderTimeout: 5 * time.Second, RequestTimeout: time.Second,
+		MaxHeaderBytes: 65536, MaxBodyBytes: 4194304, MaxInFlight: 128,
 		Host: "127.0.0.1", Port: 8081,
 		ReadTimeout: time.Second, WriteTimeout: 2 * time.Second,
 		IdleTimeout: 3 * time.Second, ShutdownTimeout: 4 * time.Second,
@@ -122,7 +125,7 @@ func TestLoadInvalidFiles(t *testing.T) {
 
 	for _, tc := range []struct{ name, yaml, want string }{
 		{"malformed", "app: [\n", "decode config file"},
-		{"unknown", "server: {prt: 8080}\n", "field prt not found"},
+		{"unknown", "server: {prt: 8080}\n", "unknown server field"},
 		{"multiple documents", "app: {name: Lens}\n---\nserver: {port: 8080}\n", "single YAML document"},
 		{"invalid duration", "server: {read_timeout: someday}\n", "time.Duration"},
 		{"invalid port", "server: {port: 65536}\n", "between 1 and 65535"},
@@ -479,6 +482,82 @@ func TestInvalidSearchAndRedisConfig(t *testing.T) {
 			_, err := load("", env(map[string]string{key: value}))
 			if err == nil || !strings.Contains(err.Error(), key) {
 				t.Fatalf("expected %s config error, got %v", key, err)
+			}
+		})
+	}
+}
+
+func TestHardeningConfiguration(t *testing.T) {
+	cfg, err := load("", env(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Auth.Enabled || !reflect.DeepEqual(cfg.Auth.BearerTokens, []string{}) ||
+		cfg.Server.ReadHeaderTimeout != 5*time.Second || cfg.Server.RequestTimeout != 8*time.Second ||
+		cfg.Server.MaxHeaderBytes != 65536 || cfg.Server.MaxBodyBytes != 4194304 || cfg.Server.MaxInFlight != 128 ||
+		cfg.GitHub.GitBaseURL != "" || !reflect.DeepEqual(cfg.CORS.AllowedHeaders, []string{"Authorization", "Content-Type", "X-Request-ID"}) {
+		t.Fatal("unexpected hardening defaults")
+	}
+	path := writeConfig(t, `
+auth: {enabled: true, bearer_tokens: [yaml-one, yaml-two]}
+server: {read_header_timeout: 2s, request_timeout: 3s, max_header_bytes: 4096, max_body_bytes: 8192, max_in_flight: 20}
+github: {git_base_url: "http://fixture:8080/git"}
+`)
+	cfg, err = load(path, env(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Auth.Enabled || !reflect.DeepEqual(cfg.Auth.BearerTokens, []string{"yaml-one", "yaml-two"}) ||
+		cfg.Server.ReadHeaderTimeout != 2*time.Second || cfg.Server.RequestTimeout != 3*time.Second ||
+		cfg.Server.MaxHeaderBytes != 4096 || cfg.Server.MaxBodyBytes != 8192 || cfg.Server.MaxInFlight != 20 ||
+		cfg.GitHub.GitBaseURL != "http://fixture:8080/git" {
+		t.Fatal("hardening YAML values failed to load")
+	}
+	cfg, err = load(path, env(map[string]string{
+		"AUTH_ENABLED": "false", "AUTH_BEARER_TOKENS": "env-one,env-two",
+		"SERVER_READ_HEADER_TIMEOUT": "1s", "SERVER_REQUEST_TIMEOUT": "2s",
+		"SERVER_MAX_HEADER_BYTES": "2048", "SERVER_MAX_BODY_BYTES": "4096", "SERVER_MAX_IN_FLIGHT": "0",
+		"GITHUB_GIT_BASE_URL": "https://mirror.example",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Auth.Enabled || !reflect.DeepEqual(cfg.Auth.BearerTokens, []string{"env-one", "env-two"}) ||
+		cfg.Server.ReadHeaderTimeout != time.Second || cfg.Server.RequestTimeout != 2*time.Second ||
+		cfg.Server.MaxHeaderBytes != 2048 || cfg.Server.MaxBodyBytes != 4096 || cfg.Server.MaxInFlight != 0 ||
+		cfg.GitHub.GitBaseURL != "https://mirror.example" {
+		t.Fatal("hardening environment overrides failed to load")
+	}
+}
+
+func TestInvalidHardeningConfiguration(t *testing.T) {
+	for _, source := range []string{
+		"auth: {enabled: true}", "auth: {bearer_token: [token]}", "auth: {bearer_tokens: ['']}",
+		"auth: {enabled: 'false'}", "auth: {bearer_tokens: ['valid', null]}", "auth: {bearer_tokens: [123]}",
+		"auth: {bearer_tokens: token}",
+		`auth: {bearer_tokens: ["has\0nul"]}`, "auth: {bearer_tokens: ['has space']}",
+		"auth: {bearer_tokens: ['has\u00a0space']}", "auth: {bearer_tokens: [repeat, repeat]}",
+		"server: {read_header_timeout: 0s}", "server: {request_timeout: -1s}", "server: {request_timeout: 11s}",
+		"server: {max_header_bytes: 1023}", "server: {max_header_bytes: 1048577}",
+		"server: {max_body_bytes: 1023}", "server: {max_body_bytes: 67108865}",
+		"server: {max_in_flight: -1}", "server: {max_in_flight: 10001}",
+		"server: {max_header_bytes: 8192.5}", "server: {max_body_bytes: 2048.0}", "server: {max_in_flight: 8.0}",
+		"server: {max_flight: 2}", "github: {git_base_url: 'file:///tmp/git'}", "github: {git_base_url: 'http://:80'}",
+	} {
+		t.Run(source, func(t *testing.T) {
+			if _, err := load(writeConfig(t, source), env(nil)); err == nil {
+				t.Fatal("invalid YAML accepted")
+			}
+		})
+	}
+	for key, value := range map[string]string{
+		"AUTH_ENABLED": "perhaps", "AUTH_BEARER_TOKENS": "one, two", "SERVER_MAX_BODY_BYTES": "3.2",
+		"SERVER_MAX_HEADER_BYTES": "16384.5", "SERVER_MAX_IN_FLIGHT": "1.5", "SERVER_REQUEST_TIMEOUT": "soon",
+		"SERVER_READ_HEADER_TIMEOUT": "0s", "GITHUB_GIT_BASE_URL": "http://",
+	} {
+		t.Run(key, func(t *testing.T) {
+			if _, err := load("", env(map[string]string{key: value})); err == nil || !strings.Contains(err.Error(), key) {
+				t.Fatalf("error = %v, want an error identifying %s", err, key)
 			}
 		})
 	}

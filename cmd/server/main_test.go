@@ -69,3 +69,26 @@ func TestRunHTTPAndWorkerModes(t *testing.T) {
 		})
 	}
 }
+
+func TestRunProductionStartupRedactsDatabaseCredentials(t *testing.T) {
+	t.Setenv("APP_CONFIG_FILE", "../../configs/config.yaml")
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("AUTH_ENABLED", "false")
+	t.Setenv("AUTH_BEARER_TOKENS", "startup-token-fixture")
+	t.Setenv("DATABASE_URL", "postgres://user:startup-password@db:invalid/projectlens?password=startup-secret")
+	t.Setenv("LOG_FORMAT", "json")
+	t.Setenv("LOG_LEVEL", "info")
+	var stdout, stderr bytes.Buffer
+	if code := run(nil, &stdout, &stderr); code != 1 {
+		t.Fatalf("exit = %d, want invalid database failure", code)
+	}
+	log := stdout.String()
+	for _, want := range []string{"server starting", "server stopped", "auth_enabled", "auth_token_count", "WARN", "API authentication is disabled in production"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("logs missing %q", want)
+		}
+	}
+	if strings.Contains(log+stderr.String(), "startup-") {
+		t.Fatal("startup diagnostics contain credentials")
+	}
+}

@@ -13,13 +13,13 @@ import (
 )
 
 type gitRunner struct {
-	token    string
-	testHTTP bool
+	token     string
+	allowHTTP bool
 }
 
 func (g gitRunner) command(ctx context.Context, auth bool, args ...string) *exec.Cmd {
 	protocol := "https"
-	if g.testHTTP {
+	if g.allowHTTP {
 		protocol = "http"
 	}
 	flags := []string{
@@ -58,7 +58,7 @@ func (g gitRunner) command(ctx context.Context, auth bool, args ...string) *exec
 	cmd.Env = append(cmd.Env, "LC_ALL=C", "GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_OPTIONAL_LOCKS=0", "GIT_SSH_COMMAND=false", "GIT_ASKPASS=",
 		"GIT_NO_LAZY_FETCH=1", "GIT_ALLOW_PROTOCOL="+allowedProtocol)
-	if auth && g.token != "" && !g.testHTTP {
+	if auth && g.token != "" && !g.allowHTTP {
 		cmd.Env = append(cmd.Env, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.https://github.com/.extraHeader",
 			"GIT_CONFIG_VALUE_0=Authorization: Bearer "+g.token)
 	}

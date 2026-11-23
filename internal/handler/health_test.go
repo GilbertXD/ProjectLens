@@ -1,7 +1,9 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -38,5 +40,45 @@ func TestHealthHandler(t *testing.T) {
 	}
 	if uptime, err := time.ParseDuration(body["uptime"]); err != nil || uptime < 0 {
 		t.Fatalf("uptime = %q, want non-negative duration", body["uptime"])
+	}
+}
+
+type probeFunc func(context.Context) error
+
+func (ping probeFunc) Ping(ctx context.Context) error { return ping(ctx) }
+
+func TestReadyHandler(t *testing.T) {
+	ok := probeFunc(func(context.Context) error { return nil })
+	unavailable := probeFunc(func(context.Context) error { return errors.New("sensitive connection details") })
+	for _, tc := range []struct {
+		name, redis, postgres, status string
+		pg                            Pinger
+		cache                         CachePinger
+		code                          int
+	}{
+		{"cache disabled", "disabled", "ok", "ok", ok, nil, 200},
+		{"both ready", "ok", "ok", "ok", ok, ok, 200},
+		{"redis unavailable", "degraded", "ok", "ok", ok, unavailable, 200},
+		{"postgres unavailable", "ok", "unavailable", "unavailable", unavailable, ok, 503},
+		{"both unavailable", "degraded", "unavailable", "unavailable", unavailable, unavailable, 503},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			engine := gin.New()
+			engine.GET("/readyz", ReadyHandler(tc.pg, tc.cache))
+			resp := httptest.NewRecorder()
+			engine.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+			var body struct {
+				Status string
+				Checks map[string]string
+			}
+			if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if resp.Code != tc.code || body.Status != tc.status || body.Checks["postgres"] != tc.postgres ||
+				body.Checks["redis"] != tc.redis || strings.Contains(resp.Body.String(), "sensitive") {
+				t.Fatalf("readiness = %d %s", resp.Code, resp.Body)
+			}
+		})
 	}
 }

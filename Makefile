@@ -1,4 +1,4 @@
-.PHONY: run run-worker build build-worker test vet tidy docker-up docker-down
+.PHONY: run run-worker build build-worker build-migrate test test-e2e docker-e2e vet tidy docker-up docker-down
 
 run:
 	go run ./cmd/server
@@ -6,11 +6,14 @@ run:
 run-worker:
 	go run ./cmd/worker
 
-build: build-worker
+build: build-worker build-migrate
 	go build -o bin/projectlens-server ./cmd/server
 
 build-worker:
 	go build -o bin/projectlens-worker ./cmd/worker
+
+build-migrate:
+	go build -o bin/projectlens-migrate ./cmd/migrate
 
 test:
 	go test -race -v ./...
@@ -40,3 +43,10 @@ migrate-status:
 
 test-integration:
 	go test -race -v ./internal/integration
+
+test-e2e:
+	@test -n "$$TEST_DATABASE_URL" || { echo "Set TEST_DATABASE_URL to a PostgreSQL test database"; exit 1; }
+	go test -race -count=1 -v -run '^TestE2EDelivery$$' ./internal/integration
+
+docker-e2e:
+	bash scripts/e2e_docker.sh

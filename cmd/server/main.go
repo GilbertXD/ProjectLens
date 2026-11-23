@@ -59,17 +59,25 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	log := logger.New(cfg.Log, stdout)
+	log.Info("server starting", "env", cfg.App.Env, "version", cfg.App.Version,
+		"worker_mode", cfg.Worker.Mode, "database_target", logger.RedactDSN(cfg.Database.DSN),
+		"auth_enabled", cfg.Auth.Enabled, "auth_token_count", len(cfg.Auth.BearerTokens),
+		"max_in_flight", cfg.Server.MaxInFlight, "max_body_bytes", cfg.Server.MaxBodyBytes, "request_timeout", cfg.Server.RequestTimeout, "redis_enabled", cfg.Redis.Enabled)
+	defer log.Info("server stopped")
+	if cfg.App.Env == "production" && !cfg.Auth.Enabled {
+		log.Warn("API authentication is disabled in production", "auth_enabled", false)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	pool, err := db.NewPool(ctx, cfg.Database)
 	if err != nil {
-		fmt.Fprintf(stderr, "initialize database: %v\n", err)
+		log.Error("initialize database failed", "database_target", logger.RedactDSN(cfg.Database.DSN))
 		return 1
 	}
 	defer pool.Close()
 	if cfg.Database.AutoMigrate {
 		if err := db.MigrateUp(ctx, pool); err != nil {
-			fmt.Fprintf(stderr, "migrate database: %v\n", err)
+			log.Error("migrate database failed")
 			return 1
 		}
 	}
@@ -103,15 +111,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 	jobStore := repository.NewPostgresJobStore(pool)
 	jobs := service.NewJobService(jobStore, registry, cfg.Worker)
 	var searchCache service.SearchCache
+	var cachePinger handler.CachePinger
 	if cfg.Redis.Enabled {
 		redisCache := cache.NewRedisSearchCache(cfg.Redis)
 		defer redisCache.Close()
 		probeCtx, cancel := context.WithTimeout(ctx, cfg.Redis.DialTimeout)
 		if err := redisCache.Ping(probeCtx); err != nil {
-			log.WarnContext(ctx, "Redis search cache unavailable at startup", "error", err)
+			log.WarnContext(ctx, "Redis search cache unavailable at startup")
 		}
 		cancel()
 		searchCache = redisCache
+		cachePinger = redisCache
 	}
 	search := service.NewSearchService(repository.NewPostgresSearchStore(pool), searchCache, cfg.Search, cfg.Redis.KeyPrefix, log)
 	routes := router.New(cfg, log, router.Dependencies{
@@ -121,6 +131,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		Snapshots:    handler.NewSnapshotHandler(syncer, log),
 		Search:       handler.NewSearchHandler(search, log),
 		Pinger:       pool,
+		CachePinger:  cachePinger,
 		Jobs:         handler.NewJobHandler(jobs, log),
 	})
 	runner := worker.NewRunner(jobStore, registry, cfg.Worker, log)

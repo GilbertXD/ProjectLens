@@ -39,6 +39,9 @@ func (h *SearchHandler) search(c *gin.Context) {
 	if err == nil {
 		result, err = h.service.Search(c.Request.Context(), c.Param("id"), filter)
 	}
+	if err != nil && writeRequestLimitError(c, err) {
+		return
+	}
 	switch {
 	case err == nil:
 		c.Header("X-Search-Cache", string(result.CacheStatus))

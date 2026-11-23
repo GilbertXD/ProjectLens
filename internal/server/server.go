@@ -22,12 +22,14 @@ type Server struct {
 func New(cfg config.Config, log *slog.Logger, engine http.Handler) *Server {
 	return &Server{
 		http: &http.Server{
-			Addr:         net.JoinHostPort(cfg.Server.Host, strconv.Itoa(int(cfg.Server.Port))),
-			Handler:      engine,
-			ReadTimeout:  cfg.Server.ReadTimeout,
-			WriteTimeout: cfg.Server.WriteTimeout,
-			IdleTimeout:  cfg.Server.IdleTimeout,
-			ErrorLog:     slog.NewLogLogger(log.Handler(), slog.LevelError),
+			Addr:              net.JoinHostPort(cfg.Server.Host, strconv.Itoa(int(cfg.Server.Port))),
+			Handler:           engine,
+			ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
+			MaxHeaderBytes:    cfg.Server.MaxHeaderBytes,
+			ReadTimeout:       cfg.Server.ReadTimeout,
+			WriteTimeout:      cfg.Server.WriteTimeout,
+			IdleTimeout:       cfg.Server.IdleTimeout,
+			ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelError),
 		},
 		log:             log,
 		shutdownTimeout: cfg.Server.ShutdownTimeout,

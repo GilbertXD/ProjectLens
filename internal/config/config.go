@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
@@ -22,6 +23,7 @@ type RepositoryConfig struct {
 }
 
 type GitHubConfig struct {
+	GitBaseURL string        `yaml:"git_base_url"`
 	APIBaseURL string        `yaml:"api_base_url"`
 	Token      string        `yaml:"token"`
 	Timeout    time.Duration `yaml:"timeout"`
@@ -173,7 +175,7 @@ type RedisConfig struct {
 
 func (cfg *RedisConfig) UnmarshalYAML(node *yaml.Node) error {
 	type plain RedisConfig
-	return decodeSearchSection(node, (*plain)(cfg), "redis", []string{"db"},
+	return decodeStrictSection(node, (*plain)(cfg), "redis", []string{"db"},
 		[]string{"enabled", "addr", "password", "key_prefix", "dial_timeout", "read_timeout", "write_timeout"})
 }
 
@@ -208,7 +210,7 @@ func DefaultSearchConfig() SearchConfig {
 
 func (cfg *SearchConfig) UnmarshalYAML(node *yaml.Node) error {
 	type plain SearchConfig
-	return decodeSearchSection(node, (*plain)(cfg), "search",
+	return decodeStrictSection(node, (*plain)(cfg), "search",
 		[]string{"default_limit", "max_limit", "max_query_length"}, []string{"cache_ttl"})
 }
 
@@ -222,7 +224,7 @@ func (cfg SearchConfig) Validate() error {
 	return nil
 }
 
-func decodeSearchSection(node *yaml.Node, cfg any, section string, integers, otherFields []string) error {
+func decodeStrictSection(node *yaml.Node, cfg any, section string, integers, otherFields []string) error {
 	if node.Kind != yaml.MappingNode {
 		return fmt.Errorf("line %d: %s must be a mapping", node.Line, section)
 	}
@@ -230,9 +232,7 @@ func decodeSearchSection(node *yaml.Node, cfg any, section string, integers, oth
 		key, value := node.Content[i], node.Content[i+1]
 		switch {
 		case slices.Contains(integers, key.Value):
-			if value.Kind == yaml.AliasNode {
-				value = value.Alias
-			}
+			value = resolveYAMLAlias(value)
 			if value.Kind != yaml.ScalarNode || value.ShortTag() != "!!int" {
 				return fmt.Errorf("line %d: %s.%s must be an integer", value.Line, section, key.Value)
 			}
@@ -244,7 +244,69 @@ func decodeSearchSection(node *yaml.Node, cfg any, section string, integers, oth
 	return node.Decode(cfg)
 }
 
+type AuthConfig struct {
+	Enabled      bool     `yaml:"enabled"`
+	BearerTokens []string `yaml:"bearer_tokens"`
+}
+
+func (cfg *AuthConfig) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: auth must be a mapping", node.Line)
+	}
+	for i := 0; i < len(node.Content); i += 2 {
+		key, value := node.Content[i], resolveYAMLAlias(node.Content[i+1])
+		switch key.Value {
+		case "enabled":
+			if value.ShortTag() != "!!bool" {
+				return fmt.Errorf("line %d: auth.enabled must be a boolean", value.Line)
+			}
+		case "bearer_tokens":
+			if value.Kind != yaml.SequenceNode {
+				return fmt.Errorf("line %d: auth.bearer_tokens must be a sequence", value.Line)
+			}
+			for _, token := range value.Content {
+				if resolveYAMLAlias(token).ShortTag() != "!!str" {
+					return fmt.Errorf("line %d: auth.bearer_tokens entries must be strings", token.Line)
+				}
+			}
+		default:
+			return fmt.Errorf("line %d: unknown auth field", key.Line)
+		}
+	}
+	type plain AuthConfig
+	if err := node.Decode((*plain)(cfg)); err != nil {
+		// The YAML decoder may include the supplied scalar in an error.
+		return fmt.Errorf("line %d: cannot decode auth settings", node.Line)
+	}
+	return nil
+}
+
+func resolveYAMLAlias(node *yaml.Node) *yaml.Node {
+	if node.Kind == yaml.AliasNode {
+		return node.Alias
+	}
+	return node
+}
+
+func (cfg AuthConfig) Validate() error {
+	if cfg.Enabled && len(cfg.BearerTokens) == 0 {
+		return errors.New("auth.bearer_tokens (AUTH_BEARER_TOKENS) must contain at least one token when auth is enabled")
+	}
+	seen := make(map[string]struct{}, len(cfg.BearerTokens))
+	for i, token := range cfg.BearerTokens {
+		if token == "" || strings.ContainsRune(token, 0) || strings.ContainsFunc(token, unicode.IsSpace) {
+			return fmt.Errorf("auth.bearer_tokens (AUTH_BEARER_TOKENS) entry %d must be non-empty and contain no whitespace or NUL", i+1)
+		}
+		if _, duplicate := seen[token]; duplicate {
+			return fmt.Errorf("auth.bearer_tokens (AUTH_BEARER_TOKENS) entry %d is a duplicate", i+1)
+		}
+		seen[token] = struct{}{}
+	}
+	return nil
+}
+
 type Config struct {
+	Auth       AuthConfig       `yaml:"auth"`
 	Redis      RedisConfig      `yaml:"redis"`
 	Search     SearchConfig     `yaml:"search"`
 	Document   DocumentConfig   `yaml:"document"`
@@ -340,12 +402,24 @@ type AppConfig struct {
 }
 
 type ServerConfig struct {
-	Host            string        `yaml:"host"`
-	Port            Port          `yaml:"port"`
-	ReadTimeout     time.Duration `yaml:"read_timeout"`
-	WriteTimeout    time.Duration `yaml:"write_timeout"`
-	IdleTimeout     time.Duration `yaml:"idle_timeout"`
-	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
+	ReadHeaderTimeout time.Duration `yaml:"read_header_timeout"`
+	RequestTimeout    time.Duration `yaml:"request_timeout"`
+	MaxHeaderBytes    int           `yaml:"max_header_bytes"`
+	MaxBodyBytes      int64         `yaml:"max_body_bytes"`
+	MaxInFlight       int           `yaml:"max_in_flight"`
+	Host              string        `yaml:"host"`
+	Port              Port          `yaml:"port"`
+	ReadTimeout       time.Duration `yaml:"read_timeout"`
+	WriteTimeout      time.Duration `yaml:"write_timeout"`
+	IdleTimeout       time.Duration `yaml:"idle_timeout"`
+	ShutdownTimeout   time.Duration `yaml:"shutdown_timeout"`
+}
+
+func (cfg *ServerConfig) UnmarshalYAML(node *yaml.Node) error {
+	type plain ServerConfig
+	return decodeStrictSection(node, (*plain)(cfg), "server",
+		[]string{"port", "max_header_bytes", "max_body_bytes", "max_in_flight"},
+		[]string{"host", "read_header_timeout", "request_timeout", "read_timeout", "write_timeout", "idle_timeout", "shutdown_timeout"})
 }
 
 type Port int
@@ -376,6 +450,7 @@ type CORSConfig struct {
 
 func defaults() Config {
 	return Config{
+		Auth: AuthConfig{BearerTokens: []string{}},
 		Redis: RedisConfig{
 			Enabled: true, Addr: "localhost:6379", KeyPrefix: "projectlens",
 			DialTimeout: 300 * time.Millisecond, ReadTimeout: 300 * time.Millisecond, WriteTimeout: 300 * time.Millisecond,
@@ -410,18 +485,23 @@ func defaults() Config {
 		},
 		App: AppConfig{Name: "ProjectLens", Env: "development", Version: "0.1.0"},
 		Server: ServerConfig{
-			Host:            "0.0.0.0",
-			Port:            8080,
-			ReadTimeout:     5 * time.Second,
-			WriteTimeout:    10 * time.Second,
-			IdleTimeout:     60 * time.Second,
-			ShutdownTimeout: 10 * time.Second,
+			ReadHeaderTimeout: 5 * time.Second,
+			RequestTimeout:    8 * time.Second,
+			MaxHeaderBytes:    65536,
+			MaxBodyBytes:      4194304,
+			MaxInFlight:       128,
+			Host:              "0.0.0.0",
+			Port:              8080,
+			ReadTimeout:       5 * time.Second,
+			WriteTimeout:      10 * time.Second,
+			IdleTimeout:       60 * time.Second,
+			ShutdownTimeout:   10 * time.Second,
 		},
 		Log: LogConfig{Level: "info", Format: "text"},
 		CORS: CORSConfig{
 			AllowedOrigins: []string{},
 			AllowedMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-			AllowedHeaders: []string{"Content-Type", "X-Request-ID"},
+			AllowedHeaders: []string{"Authorization", "Content-Type", "X-Request-ID"},
 		},
 	}
 }
@@ -484,6 +564,7 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		{"SCANNER_CACHE_DIR", &cfg.Scanner.CacheDir},
 		{"WORKER_MODE", &cfg.Worker.Mode},
 		{"WORKER_ID", &cfg.Worker.ID},
+		{"GITHUB_GIT_BASE_URL", &cfg.GitHub.GitBaseURL},
 		{"GITHUB_API_BASE_URL", &cfg.GitHub.APIBaseURL},
 		{"GITHUB_TOKEN", &cfg.GitHub.Token},
 		{"GITHUB_USER_AGENT", &cfg.GitHub.UserAgent},
@@ -519,6 +600,8 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		name   string
 		target *int
 	}{
+		{"SERVER_MAX_HEADER_BYTES", &cfg.Server.MaxHeaderBytes},
+		{"SERVER_MAX_IN_FLIGHT", &cfg.Server.MaxInFlight},
 		{"REDIS_DB", &cfg.Redis.DB},
 		{"SEARCH_DEFAULT_LIMIT", &cfg.Search.DefaultLimit},
 		{"SEARCH_MAX_LIMIT", &cfg.Search.MaxLimit},
@@ -542,13 +625,14 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		name   string
 		target *bool
 	}{
+		{"AUTH_ENABLED", &cfg.Auth.Enabled},
 		{"DB_AUTO_MIGRATE", &cfg.Database.AutoMigrate},
 		{"REDIS_ENABLED", &cfg.Redis.Enabled},
 	} {
 		if value, ok := lookupEnv(field.name); ok {
 			enabled, err := strconv.ParseBool(value)
 			if err != nil {
-				return fmt.Errorf("%s must be a boolean: %w", field.name, err)
+				return fmt.Errorf("%s must be a boolean", field.name)
 			}
 			*field.target = enabled
 		}
@@ -583,6 +667,8 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		{"DB_MAX_CONN_IDLE_TIME", &cfg.Database.MaxConnIdleTime},
 		{"DB_HEALTH_CHECK_PERIOD", &cfg.Database.HealthCheckPeriod},
 		{"DB_CONNECT_TIMEOUT", &cfg.Database.ConnectTimeout},
+		{"SERVER_READ_HEADER_TIMEOUT", &cfg.Server.ReadHeaderTimeout},
+		{"SERVER_REQUEST_TIMEOUT", &cfg.Server.RequestTimeout},
 		{"SERVER_READ_TIMEOUT", &cfg.Server.ReadTimeout},
 		{"SERVER_WRITE_TIMEOUT", &cfg.Server.WriteTimeout},
 		{"SERVER_IDLE_TIMEOUT", &cfg.Server.IdleTimeout},
@@ -601,6 +687,7 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		name   string
 		target *int64
 	}{
+		{"SERVER_MAX_BODY_BYTES", &cfg.Server.MaxBodyBytes},
 		{"DOCUMENT_MAX_CONTENT_BYTES", &cfg.Document.MaxContentBytes},
 		{"SCANNER_MAX_FILE_SIZE", &cfg.Scanner.MaxFileSize},
 		{"SCANNER_MAX_TOTAL_BYTES", &cfg.Scanner.MaxTotalBytes},
@@ -611,6 +698,12 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 				return fmt.Errorf("%s must be a 64-bit integer: %w", field.name, err)
 			}
 			*field.target = number
+		}
+	}
+	if value, ok := lookupEnv("AUTH_BEARER_TOKENS"); ok {
+		cfg.Auth.BearerTokens = []string{}
+		if value != "" {
+			cfg.Auth.BearerTokens = strings.Split(value, ",")
 		}
 	}
 	if value, ok := lookupEnv("SCANNER_EXCLUDE_PATTERNS"); ok {
@@ -641,7 +734,15 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 	return nil
 }
 
+func validHTTPBaseURL(raw string) bool {
+	endpoint, err := url.Parse(raw)
+	return err == nil && (endpoint.Scheme == "http" || endpoint.Scheme == "https") && endpoint.Hostname() != ""
+}
+
 func (cfg Config) Validate() error {
+	if err := cfg.Auth.Validate(); err != nil {
+		return err
+	}
 	if err := cfg.Redis.Validate(); err != nil {
 		return err
 	}
@@ -681,9 +782,11 @@ func (cfg Config) Validate() error {
 			return errors.New("repository.allowed_local_roots (REPO_ALLOWED_LOCAL_ROOTS) must contain absolute paths without NUL")
 		}
 	}
-	endpoint, err := url.Parse(cfg.GitHub.APIBaseURL)
-	if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Hostname() == "" {
+	if !validHTTPBaseURL(cfg.GitHub.APIBaseURL) {
 		return errors.New("github.api_base_url (GITHUB_API_BASE_URL) must be an HTTP or HTTPS URL with a host")
+	}
+	if cfg.GitHub.GitBaseURL != "" && !validHTTPBaseURL(cfg.GitHub.GitBaseURL) {
+		return errors.New("github.git_base_url (GITHUB_GIT_BASE_URL) must be an HTTP or HTTPS URL with a host")
 	}
 	if cfg.GitHub.Timeout <= 0 {
 		return errors.New("github.timeout (GITHUB_TIMEOUT) must be positive")
@@ -711,10 +814,24 @@ func (cfg Config) Validate() error {
 	if cfg.Server.Port < 1 || cfg.Server.Port > 65535 {
 		return fmt.Errorf("server.port (SERVER_PORT) %d must be between 1 and 65535", cfg.Server.Port)
 	}
+	if cfg.Server.RequestTimeout > cfg.Server.WriteTimeout {
+		return errors.New("server.request_timeout (SERVER_REQUEST_TIMEOUT) must be at most write_timeout")
+	}
+	if cfg.Server.MaxHeaderBytes < 1024 || cfg.Server.MaxHeaderBytes > 1048576 {
+		return errors.New("server.max_header_bytes (SERVER_MAX_HEADER_BYTES) must be between 1024 and 1048576")
+	}
+	if cfg.Server.MaxBodyBytes < 1024 || cfg.Server.MaxBodyBytes > 67108864 {
+		return errors.New("server.max_body_bytes (SERVER_MAX_BODY_BYTES) must be between 1024 and 67108864")
+	}
+	if cfg.Server.MaxInFlight < 0 || cfg.Server.MaxInFlight > 10000 {
+		return errors.New("server.max_in_flight (SERVER_MAX_IN_FLIGHT) must be between 0 and 10000")
+	}
 	for _, field := range []struct {
 		name  string
 		value time.Duration
 	}{
+		{"server.read_header_timeout (SERVER_READ_HEADER_TIMEOUT)", cfg.Server.ReadHeaderTimeout},
+		{"server.request_timeout (SERVER_REQUEST_TIMEOUT)", cfg.Server.RequestTimeout},
 		{"worker.poll_interval (WORKER_POLL_INTERVAL)", cfg.Worker.PollInterval},
 		{"worker.lease_duration (WORKER_LEASE_DURATION)", cfg.Worker.LeaseDuration},
 		{"worker.heartbeat_interval (WORKER_HEARTBEAT_INTERVAL)", cfg.Worker.HeartbeatInterval},

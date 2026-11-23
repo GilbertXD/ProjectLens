@@ -45,10 +45,16 @@ func (h *JobHandler) enqueue(c *gin.Context) {
 	decoder.DisallowUnknownFields()
 	var input *domain.CreateJobInput
 	if err := decoder.Decode(&input); err != nil || input == nil {
+		if writeRequestLimitError(c, err) {
+			return
+		}
 		h.respond(c, 0, nil, fmt.Errorf("%w: body must be a valid job JSON object", domain.ErrInvalidInput))
 		return
 	}
 	if err := decoder.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
+		if writeRequestLimitError(c, err) {
+			return
+		}
 		h.respond(c, 0, nil, fmt.Errorf("%w: body must contain a single JSON value", domain.ErrInvalidInput))
 		return
 	}
@@ -98,6 +104,9 @@ func (h *JobHandler) cancel(c *gin.Context) {
 func (h *JobHandler) respond(c *gin.Context, status int, body any, err error) {
 	if err == nil {
 		c.JSON(status, body)
+		return
+	}
+	if writeRequestLimitError(c, err) {
 		return
 	}
 	for _, mapping := range []struct {

@@ -3,6 +3,7 @@ package router
 import (
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -19,6 +20,7 @@ type Dependencies struct {
 	Snapshots    *handler.SnapshotHandler
 	Search       *handler.SearchHandler
 	Pinger       handler.Pinger
+	CachePinger  handler.CachePinger
 }
 
 func New(cfg config.Config, log *slog.Logger, optional ...Dependencies) *gin.Engine {
@@ -38,11 +40,17 @@ func New(cfg config.Config, log *slog.Logger, optional ...Dependencies) *gin.Eng
 	engine := gin.New()
 	_ = engine.SetTrustedProxies(nil)
 	engine.RedirectTrailingSlash = false
-	engine.Use(middleware.RequestID(), middleware.Logger(log), middleware.Recovery(log), middleware.CORS(cfg.CORS))
+	engine.Use(
+		middleware.RequestID(), middleware.SecurityHeaders(), middleware.Logger(log), middleware.Recovery(log),
+		middleware.CORS(cfg.CORS), middleware.MaxInFlight(cfg.Server.MaxInFlight, "/healthz", "/readyz"),
+		middleware.RequestTimeout(cfg.Server.RequestTimeout), middleware.MaxBodyBytes(cfg.Server.MaxBodyBytes),
+	)
 	engine.GET("/healthz", handler.HealthHandler(cfg.App))
-	engine.GET("/readyz", handler.ReadyHandler(deps.Pinger))
+	engine.GET("/readyz", handler.ReadyHandler(deps.Pinger, deps.CachePinger))
+	handler.RegisterOpenAPI(engine)
 
-	api := engine.Group("/api/v1")
+	auth := middleware.BearerAuth(cfg.Auth)
+	api := engine.Group("/api/v1", auth)
 	if deps.Projects != nil {
 		deps.Projects.Register(api)
 	}
@@ -65,7 +73,13 @@ func New(cfg config.Config, log *slog.Logger, optional ...Dependencies) *gin.Eng
 		c.JSON(http.StatusOK, gin.H{"message": "pong"})
 	})
 	engine.NoRoute(func(c *gin.Context) {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		if c.Request.URL.Path == "/api/v1" || strings.HasPrefix(c.Request.URL.Path, "/api/v1/") {
+			auth(c)
+			if c.IsAborted() {
+				return
+			}
+		}
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found", "code": "not_found"})
 	})
 	return engine
 }

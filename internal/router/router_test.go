@@ -49,10 +49,13 @@ func TestRoutes(t *testing.T) {
 				t.Fatalf("status = %d, headers = %v, body = %s", resp.Code, resp.Header(), resp.Body)
 			}
 			if resp.Header().Get(middleware.RequestIDHeader) != "route-test" ||
-				resp.Header().Get("Access-Control-Allow-Origin") != "https://app.example" {
+				resp.Header().Get("Access-Control-Allow-Origin") != "https://app.example" ||
+				resp.Header().Get("X-Content-Type-Options") != "nosniff" || resp.Header().Get("X-Frame-Options") != "DENY" ||
+				resp.Header().Get("Referrer-Policy") != "no-referrer" ||
+				(tc.path == "/api/v1/ping" && resp.Header().Get("Cache-Control") != "no-store") {
 				t.Fatalf("missing middleware headers: %v", resp.Header())
 			}
-			var body map[string]string
+			var body map[string]any
 			if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
 				t.Fatal(err)
 			}

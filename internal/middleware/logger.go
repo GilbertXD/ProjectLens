@@ -2,7 +2,9 @@ package middleware
 
 import (
 	"log/slog"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gin-gonic/gin"
 )
@@ -12,17 +14,46 @@ func Logger(log *slog.Logger) gin.HandlerFunc {
 		start := time.Now()
 		c.Next()
 
-		attrs := []slog.Attr{
+		status := c.Writer.Status()
+		level := slog.LevelInfo
+		switch {
+		case status >= 500:
+			level = slog.LevelError
+		case status >= 400:
+			level = slog.LevelWarn
+		}
+		auth := c.GetString(authStateKey)
+		if auth == "" {
+			auth = "disabled"
+		}
+		log.LogAttrs(c.Request.Context(), level, "http request",
 			slog.String("request_id", GetRequestID(c)),
 			slog.String("method", c.Request.Method),
 			slog.String("path", c.Request.URL.Path),
-			slog.Int("status", c.Writer.Status()),
+			slog.String("route", c.FullPath()),
+			slog.Int("status", status),
 			slog.Int64("latency_ms", time.Since(start).Milliseconds()),
+			slog.Int("bytes_out", max(c.Writer.Size(), 0)),
+			slog.Int64("bytes_in", c.Request.ContentLength),
 			slog.String("client_ip", c.ClientIP()),
-		}
-		if len(c.Errors) > 0 {
-			attrs = append(attrs, slog.Any("errors", c.Errors.Errors()))
-		}
-		log.LogAttrs(c.Request.Context(), slog.LevelInfo, "http request", attrs...)
+			slog.String("user_agent", sanitizeUserAgent(c.Request.UserAgent())),
+			slog.String("auth", auth),
+		)
 	}
+}
+
+func sanitizeUserAgent(value string) string {
+	var clean strings.Builder
+	count := 0
+	for _, r := range value {
+		if count == 256 {
+			break
+		}
+		if !unicode.IsPrint(r) {
+			r = ' '
+		}
+		clean.WriteRune(r)
+		count++
+	}
+	return clean.String()
 }

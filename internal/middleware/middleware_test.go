@@ -28,7 +28,7 @@ func TestRequestID(t *testing.T) {
 	engine.Use(RequestID())
 	engine.GET("/", func(c *gin.Context) { c.String(http.StatusOK, "%s", GetRequestID(c)) })
 
-	for _, incoming := range []string{"client-request-id", ""} {
+	for _, incoming := range []string{"client-request-id", "", "with space", "with\r\nnewline", "unicode-☀", strings.Repeat("a", 129), strings.Repeat("z", 128)} {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.Header.Set(RequestIDHeader, incoming)
 		resp := httptest.NewRecorder()
@@ -38,7 +38,7 @@ func TestRequestID(t *testing.T) {
 		if resp.Code != http.StatusOK || resp.Body.String() != id {
 			t.Fatalf("status, body, and request ID = %d, %q, %q", resp.Code, resp.Body.String(), id)
 		}
-		if incoming != "" {
+		if incoming == "client-request-id" || incoming == strings.Repeat("z", 128) {
 			if id != incoming {
 				t.Fatalf("request ID = %q, want %q", id, incoming)
 			}
@@ -64,13 +64,22 @@ func TestLogger(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/logged?ignore=query", nil)
 	req.Header.Set(RequestIDHeader, "logged-id")
+	req.Header.Set("User-Agent", "tool\n"+strings.Repeat("x", 300))
+	req.Header.Set("Authorization", "Bearer log-secret")
+	req.Header.Set("Cookie", "session=cookie-secret")
 	req.RemoteAddr = "192.0.2.10:1234"
 	engine.ServeHTTP(httptest.NewRecorder(), req)
 
+	for _, secret := range []string{"ignore=query", "log-secret", "cookie-secret", "missing data"} {
+		if strings.Contains(output.String(), secret) {
+			t.Fatalf("log contains %q", secret)
+		}
+	}
 	record := decodeJSON(t, &output)
 	want := map[string]any{
-		"level": "INFO", "request_id": "logged-id", "method": "GET", "path": "/logged",
-		"status": float64(http.StatusBadRequest), "client_ip": "192.0.2.10", "errors": []any{"missing data"},
+		"level": "WARN", "request_id": "logged-id", "method": "GET", "path": "/logged",
+		"status": float64(http.StatusBadRequest), "client_ip": "192.0.2.10", "route": "/logged", "auth": "disabled",
+		"bytes_in": float64(0), "bytes_out": float64(0), "user_agent": "tool " + strings.Repeat("x", 251),
 	}
 	for name, value := range want {
 		if !reflect.DeepEqual(record[name], value) {
@@ -98,7 +107,7 @@ func TestRecovery(t *testing.T) {
 	if resp.Code != http.StatusInternalServerError || !strings.HasPrefix(resp.Header().Get("Content-Type"), "application/json") {
 		t.Fatalf("status = %d, headers = %v, body = %s", resp.Code, resp.Header(), resp.Body)
 	}
-	want := map[string]any{"error": "internal server error", "request_id": "panic-id"}
+	want := map[string]any{"error": "internal server error", "request_id": "panic-id", "code": "internal_error"}
 	if got := decodeJSON(t, resp.Body); !reflect.DeepEqual(got, want) {
 		t.Fatalf("response = %v, want %v", got, want)
 	}
@@ -108,10 +117,10 @@ func TestRecovery(t *testing.T) {
 	}
 	record := decodeJSON(t, bytes.NewBuffer(lines[0]))
 	stack, _ := record["stack"].(string)
-	if record["panic"] != "test panic" || record["request_id"] != "panic-id" || !strings.Contains(stack, "debug.Stack") {
+	if strings.Contains(output.String(), "test panic") || record["request_id"] != "panic-id" || !strings.Contains(stack, "debug.Stack") {
 		t.Fatalf("panic log = %v", record)
 	}
-	if record := decodeJSON(t, bytes.NewBuffer(lines[1])); record["status"] != float64(http.StatusInternalServerError) {
+	if record := decodeJSON(t, bytes.NewBuffer(lines[1])); record["status"] != float64(http.StatusInternalServerError) || record["level"] != "ERROR" {
 		t.Fatalf("access log = %v, want status 500", record)
 	}
 
