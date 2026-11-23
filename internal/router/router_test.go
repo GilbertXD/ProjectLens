@@ -124,3 +124,23 @@ func TestJobRoutes(t *testing.T) {
 		}
 	}
 }
+
+func TestDocumentRoutes(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	engine := New(config.Config{App: config.AppConfig{Env: "test"}}, log, Dependencies{
+		Projects:  handler.NewProjectHandler(nil, log),
+		Documents: handler.NewDocumentHandler(nil, log, 0),
+	})
+	base := "/api/v1/projects/:id/documents"
+	scoped := base + "/:docId"
+	want := map[string]bool{
+		"POST " + base: true, "GET " + base: true, "GET " + scoped: true,
+		"PUT " + scoped: true, "PATCH " + scoped: true, "DELETE " + scoped: true,
+	}
+	for _, route := range engine.Routes() {
+		delete(want, route.Method+" "+route.Path)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing routes: %v", want)
+	}
+}

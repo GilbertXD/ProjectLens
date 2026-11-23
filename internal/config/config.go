@@ -129,7 +129,37 @@ func (cfg SyncConfig) Validate() error {
 	return nil
 }
 
+const (
+	DefaultDocumentMaxContentBytes int64 = 1 << 20
+	MaxDocumentContentBytesCeiling int64 = 1 << 20
+)
+
+type DocumentConfig struct {
+	MaxContentBytes int64 `yaml:"max_content_bytes"`
+}
+
+func (cfg *DocumentConfig) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: document must be a mapping", node.Line)
+	}
+	for i := 0; i < len(node.Content); i += 2 {
+		key, value := node.Content[i], node.Content[i+1]
+		if key.Value != "max_content_bytes" {
+			return fmt.Errorf("line %d: unknown document field %q", key.Line, key.Value)
+		}
+		if value.Kind == yaml.AliasNode {
+			value = value.Alias
+		}
+		if value.Kind != yaml.ScalarNode || value.ShortTag() != "!!int" {
+			return fmt.Errorf("line %d: document.max_content_bytes must be an integer", value.Line)
+		}
+	}
+	type plain DocumentConfig
+	return node.Decode((*plain)(cfg))
+}
+
 type Config struct {
+	Document   DocumentConfig   `yaml:"document"`
 	Sync       SyncConfig       `yaml:"sync"`
 	Scanner    ScannerConfig    `yaml:"scanner"`
 	Worker     WorkerConfig     `yaml:"worker"`
@@ -258,8 +288,9 @@ type CORSConfig struct {
 
 func defaults() Config {
 	return Config{
-		Scanner: DefaultScannerConfig(),
-		Sync:    SyncConfig{RetainSuperseded: 2, FailedRetention: 24 * time.Hour},
+		Document: DocumentConfig{MaxContentBytes: DefaultDocumentMaxContentBytes},
+		Scanner:  DefaultScannerConfig(),
+		Sync:     SyncConfig{RetainSuperseded: 2, FailedRetention: 24 * time.Hour},
 		Worker: WorkerConfig{
 			Mode:               "embedded",
 			Concurrency:        4,
@@ -458,6 +489,7 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		name   string
 		target *int64
 	}{
+		{"DOCUMENT_MAX_CONTENT_BYTES", &cfg.Document.MaxContentBytes},
 		{"SCANNER_MAX_FILE_SIZE", &cfg.Scanner.MaxFileSize},
 		{"SCANNER_MAX_TOTAL_BYTES", &cfg.Scanner.MaxTotalBytes},
 	} {
@@ -498,6 +530,9 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 }
 
 func (cfg Config) Validate() error {
+	if cfg.Document.MaxContentBytes < 1 || cfg.Document.MaxContentBytes > MaxDocumentContentBytesCeiling {
+		return fmt.Errorf("document.max_content_bytes (DOCUMENT_MAX_CONTENT_BYTES) must be between 1 and %d", MaxDocumentContentBytesCeiling)
+	}
 	if err := cfg.Sync.Validate(); err != nil {
 		return err
 	}

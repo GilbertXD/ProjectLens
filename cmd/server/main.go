@@ -74,6 +74,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	projectStore := repository.NewPostgresProjectRepository(pool)
 	projects := service.NewProjectService(projectStore, db.NewPgxTxManager(pool))
+	documents := service.NewDocumentService(projectStore, repository.NewPostgresDocumentStore(pool), cfg.Document.MaxContentBytes)
 	repositoryStore := repository.NewPostgresRepositoryStore(pool)
 	repositories := service.NewRepositoryService(projectStore, repositoryStore,
 		gitrepo.NewLocalInspector(cfg.Repository.AllowedLocalRoots), github.NewClient(cfg.GitHub, nil))
@@ -102,6 +103,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	jobs := service.NewJobService(jobStore, registry, cfg.Worker)
 	routes := router.New(cfg, log, router.Dependencies{
 		Projects:     handler.NewProjectHandler(projects, log),
+		Documents:    handler.NewDocumentHandler(documents, log, cfg.Document.MaxContentBytes),
 		Repositories: handler.NewRepositoryHandler(repositories, log),
 		Snapshots:    handler.NewSnapshotHandler(syncer, log),
 		Pinger:       pool,

@@ -65,3 +65,6 @@ scanner:
 sync:
   retain_superseded: 2
   failed_retention: 24h
+
+document:
+  max_content_bytes: 1048576

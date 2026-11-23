@@ -390,3 +390,37 @@ func TestSyncConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestDocumentConfig(t *testing.T) {
+	cfg, err := load("", env(nil))
+	if err != nil || cfg.Document.MaxContentBytes != DefaultDocumentMaxContentBytes {
+		t.Fatalf("default document config = %+v, %v", cfg.Document, err)
+	}
+	path := writeConfig(t, "document: {max_content_bytes: 1024}\n")
+	cfg, err = load(path, env(nil))
+	if err != nil || cfg.Document.MaxContentBytes != 1024 {
+		t.Fatalf("YAML document config = %+v, %v", cfg.Document, err)
+	}
+	cfg, err = load(path, env(map[string]string{"DOCUMENT_MAX_CONTENT_BYTES": "1"}))
+	if err != nil || cfg.Document.MaxContentBytes != 1 {
+		t.Fatalf("env document config = %+v, %v", cfg.Document, err)
+	}
+
+	for _, yaml := range []string{
+		"max_content_bytes: 0", "max_content_bytes: -1", "max_content_bytes: 1048577",
+		"max_content_bytes: 1.5", "max_content_bytes: '100'", "max_content_bytes: null", "unexpected: 100",
+	} {
+		t.Run(yaml, func(t *testing.T) {
+			if _, err := load(writeConfig(t, "document: {"+yaml+"}\n"), env(nil)); err == nil {
+				t.Fatal("expected document config error")
+			}
+		})
+	}
+	for _, value := range []string{"0", "-1", "1048577", "1.5", "", "9223372036854775808"} {
+		t.Run("env "+value, func(t *testing.T) {
+			if _, err := load(path, env(map[string]string{"DOCUMENT_MAX_CONTENT_BYTES": value})); err == nil {
+				t.Fatal("expected document env error")
+			}
+		})
+	}
+}

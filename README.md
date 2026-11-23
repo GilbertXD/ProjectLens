@@ -37,7 +37,7 @@ docker compose config -q
 
 The server requires PostgreSQL. For a Go process on the host, provision a database matching `DATABASE_URL` in `.env.example` or export a DSN for an existing database. Compose starts its own PostgreSQL instance and stores data in the named `postgres_data` volume. `GET /readyz` reports database connectivity, and `GET /healthz` continues to report process health.
 
-The server applies embedded migrations on startup by default. Set `DB_AUTO_MIGRATE=false` if you apply migrations separately using `make migrate-up`. Use `make migrate-status` to inspect migration state. `make migrate-down` rolls back one migration at a time. From the latest version, rollbacks drop source files and snapshots first, then jobs, then repositories, and finally projects and project audit logs.
+The server applies embedded migrations on startup by default. Set `DB_AUTO_MIGRATE=false` if you apply migrations separately using `make migrate-up`. Use `make migrate-status` to inspect migration state. `make migrate-down` rolls back one migration at a time. From the latest version, rollbacks drop documents first, then source files and snapshots, then jobs, then repositories, and finally projects and project audit logs.
 
 | Method | Path | Result |
 | --- | --- | --- |
@@ -57,6 +57,31 @@ curl -fsS http://localhost:8080/api/v1/projects \
 ```
 
 Set `TEST_DATABASE_URL` to a PostgreSQL database where the test user can create schemas, then run `make test-integration`. Each test creates and drops its own schema. With the variable unset, the PostgreSQL tests skip.
+
+## Markdown Documents API
+
+A project can store Markdown documents independently of its Git repositories. Set the base path to `/api/v1/projects/{projectId}/documents`. Deleting a project also deletes its documents.
+
+| Method | Path relative to base | Behavior |
+| --- | --- | --- |
+| POST | (base) | Create with `title` and optional `content`. Returns `201`. |
+| GET | (base) | List summaries without full content. Returns `200`. |
+| GET | `/{docId}` | Read the full document. Returns `200`. |
+| PUT | `/{docId}` | Replace the title and content. Omitted content becomes empty. Returns `200`. |
+| PATCH | `/{docId}` | Change `title`, `content`, or both. Returns `200`. |
+| DELETE | `/{docId}` | Delete the document. Accepts an optional `If-Match`. Returns `204`. |
+
+Lists are ordered by most recently updated, then by descending document ID. Use `limit` (default 20, maximum 100) and `offset` (default 0). The response includes `items`, `total`, `limit`, and `offset`. Requests for documents outside the specified project return `404`.
+
+New documents start at version 1. Successful creates, reads of a single document, and updates return a numeric `version` and a quoted `ETag`, such as `"1"`. PUT and PATCH require a JSON `version`, an `If-Match` header, or both with the same value. The header accepts `"1"`, `W/"1"`, or `1`. An update increments the version atomically. A stale version on an update or conditional delete returns `409 version_conflict`. Read the latest document before retrying. Missing, invalid, or mismatched version inputs on updates return `400 invalid_input`.
+
+```sh
+curl -X PATCH "$BASE/$DOCUMENT_ID" \
+  -H 'Content-Type: application/json' -H 'If-Match: "1"' \
+  -d '{"content":"# Updated notes"}'
+```
+
+Titles are trimmed and must contain 1 to 200 characters. Markdown content may be empty. Set `document.max_content_bytes` in YAML or override it with `DOCUMENT_MAX_CONTENT_BYTES`. The default and PostgreSQL ceiling are 1,048,576 UTF-8 bytes (1 MiB). Documents report the byte count as `content_bytes`. Decoded content over the configured limit returns `400 invalid_input`. The API also limits raw JSON request size to the greater of 256 KiB and twice the content limit plus 64 KiB. Requests above that raw limit return `413 payload_too_large`.
 
 ## Repository Association API
 

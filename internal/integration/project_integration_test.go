@@ -88,8 +88,10 @@ func startHTTP(cfg config.Config, pool *pgxpool.Pool) *httptest.Server {
 	svc := service.NewProjectService(store, db.NewPgxTxManager(pool))
 	repos := service.NewRepositoryService(store, repository.NewPostgresRepositoryStore(pool),
 		gitrepo.NewLocalInspector(cfg.Repository.AllowedLocalRoots), github.NewClient(cfg.GitHub, nil))
+	documents := service.NewDocumentService(store, repository.NewPostgresDocumentStore(pool), cfg.Document.MaxContentBytes)
 	return httptest.NewServer(router.New(cfg, log, router.Dependencies{
-		Projects: handler.NewProjectHandler(svc, log), Repositories: handler.NewRepositoryHandler(repos, log), Pinger: pool,
+		Documents: handler.NewDocumentHandler(documents, log, cfg.Document.MaxContentBytes),
+		Projects:  handler.NewProjectHandler(svc, log), Repositories: handler.NewRepositoryHandler(repos, log), Pinger: pool,
 	}))
 }
 
@@ -130,6 +132,15 @@ func TestProjectLifecycle(t *testing.T) {
 	}
 	if err := db.MigrateUp(ctx, pool); err != nil {
 		t.Fatal(err)
+	}
+	if err := db.MigrateDown(ctx, pool); err != nil {
+		t.Fatalf("migrate documents down: %v", err)
+	}
+	var documentsRemoved bool
+	if err := pool.QueryRow(ctx, `SELECT to_regclass('documents') IS NULL
+ AND to_regclass('source_files') IS NOT NULL AND to_regclass('snapshots') IS NOT NULL AND to_regclass('jobs') IS NOT NULL
+ AND to_regclass('repositories') IS NOT NULL AND to_regclass('projects') IS NOT NULL`).Scan(&documentsRemoved); err != nil || !documentsRemoved {
+		t.Fatalf("documents migration down did not preserve prior tables: removed=%t, error=%v", documentsRemoved, err)
 	}
 	if err := db.MigrateDown(ctx, pool); err != nil {
 		t.Fatalf("migrate snapshots down: %v", err)

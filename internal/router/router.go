@@ -12,6 +12,7 @@ import (
 )
 
 type Dependencies struct {
+	Documents    *handler.DocumentHandler
 	Jobs         *handler.JobHandler
 	Projects     *handler.ProjectHandler
 	Repositories *handler.RepositoryHandler
@@ -43,6 +44,9 @@ func New(cfg config.Config, log *slog.Logger, optional ...Dependencies) *gin.Eng
 	api := engine.Group("/api/v1")
 	if deps.Projects != nil {
 		deps.Projects.Register(api)
+	}
+	if deps.Documents != nil {
+		deps.Documents.Register(api)
 	}
 	if deps.Repositories != nil {
 		deps.Repositories.Register(api)

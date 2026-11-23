@@ -15,3 +15,8 @@ var (
 )
 
 var ErrDuplicateJobKey = errors.New("duplicate job idempotency key")
+
+var (
+	ErrVersionConflict = errors.New("document version conflict")
+	ErrPayloadTooLarge = errors.New("payload too large")
+)
