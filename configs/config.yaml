@@ -29,3 +29,12 @@ database:
   health_check_period: 1m
   connect_timeout: 5s
   auto_migrate: true
+
+repository:
+  allowed_local_roots: []
+
+github:
+  api_base_url: https://api.github.com
+  token: ""
+  timeout: 10s
+  user_agent: ProjectLens

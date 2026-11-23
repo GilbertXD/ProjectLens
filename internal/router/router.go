@@ -12,8 +12,9 @@ import (
 )
 
 type Dependencies struct {
-	Projects *handler.ProjectHandler
-	Pinger   handler.Pinger
+	Projects     *handler.ProjectHandler
+	Repositories *handler.RepositoryHandler
+	Pinger       handler.Pinger
 }
 
 func New(cfg config.Config, log *slog.Logger, optional ...Dependencies) *gin.Engine {
@@ -40,6 +41,9 @@ func New(cfg config.Config, log *slog.Logger, optional ...Dependencies) *gin.Eng
 	api := engine.Group("/api/v1")
 	if deps.Projects != nil {
 		deps.Projects.Register(api)
+	}
+	if deps.Repositories != nil {
+		deps.Repositories.Register(api)
 	}
 	api.GET("/ping", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"message": "pong"})

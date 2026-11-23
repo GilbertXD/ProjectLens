@@ -26,6 +26,11 @@ services:
       DB_MAX_CONN_IDLE_TIME: "${DB_MAX_CONN_IDLE_TIME:-5m}"
       DB_HEALTH_CHECK_PERIOD: "${DB_HEALTH_CHECK_PERIOD:-1m}"
       DB_CONNECT_TIMEOUT: "${DB_CONNECT_TIMEOUT:-5s}"
+      REPO_ALLOWED_LOCAL_ROOTS: "${REPO_ALLOWED_LOCAL_ROOTS:-}"
+      GITHUB_API_BASE_URL: "${GITHUB_API_BASE_URL:-https://api.github.com}"
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+      GITHUB_TIMEOUT: "${GITHUB_TIMEOUT:-10s}"
+      GITHUB_USER_AGENT: "${GITHUB_USER_AGENT:-ProjectLens}"
       DB_AUTO_MIGRATE: "${DB_AUTO_MIGRATE:-true}"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]

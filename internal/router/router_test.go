@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"projectlens/internal/config"
+	"projectlens/internal/handler"
 	"projectlens/internal/middleware"
 )
 
@@ -82,5 +83,24 @@ func TestReadinessWithDatabase(t *testing.T) {
 		if w.Code != tc.status || strings.Contains(w.Body.String(), "private database error") {
 			t.Errorf("readiness = %d %s, want %d", w.Code, w.Body, tc.status)
 		}
+	}
+}
+
+func TestRepositoryRoutes(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	engine := New(config.Config{App: config.AppConfig{Env: "test"}}, log, Dependencies{
+		Projects:     handler.NewProjectHandler(nil, log),
+		Repositories: handler.NewRepositoryHandler(nil, log),
+	})
+	base := "/api/v1/projects/:id/repositories"
+	want := map[string]bool{
+		"POST " + base: true, "GET " + base: true, "GET " + base + "/:repoId": true,
+		"PATCH " + base + "/:repoId": true, "POST " + base + "/:repoId/sync": true, "DELETE " + base + "/:repoId": true,
+	}
+	for _, route := range engine.Routes() {
+		delete(want, route.Method+" "+route.Path)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing routes: %v", want)
 	}
 }

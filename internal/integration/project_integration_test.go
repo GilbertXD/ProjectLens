@@ -21,6 +21,8 @@ import (
 	"projectlens/internal/config"
 	"projectlens/internal/db"
 	"projectlens/internal/domain"
+	"projectlens/internal/github"
+	"projectlens/internal/gitrepo"
 	"projectlens/internal/handler"
 	"projectlens/internal/repository"
 	"projectlens/internal/router"
@@ -82,8 +84,13 @@ func openPool(t *testing.T, cfg config.Config) *pgxpool.Pool {
 
 func startHTTP(cfg config.Config, pool *pgxpool.Pool) *httptest.Server {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc := service.NewProjectService(repository.NewPostgresProjectRepository(pool), db.NewPgxTxManager(pool))
-	return httptest.NewServer(router.New(cfg, log, router.Dependencies{Projects: handler.NewProjectHandler(svc, log), Pinger: pool}))
+	store := repository.NewPostgresProjectRepository(pool)
+	svc := service.NewProjectService(store, db.NewPgxTxManager(pool))
+	repos := service.NewRepositoryService(store, repository.NewPostgresRepositoryStore(pool),
+		gitrepo.NewLocalInspector(cfg.Repository.AllowedLocalRoots), github.NewClient(cfg.GitHub, nil))
+	return httptest.NewServer(router.New(cfg, log, router.Dependencies{
+		Projects: handler.NewProjectHandler(svc, log), Repositories: handler.NewRepositoryHandler(repos, log), Pinger: pool,
+	}))
 }
 
 func request(t *testing.T, srv *httptest.Server, method, path, body string, wantStatus int, out any) {
@@ -128,6 +135,12 @@ func TestProjectLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	var removed bool
+	if err := pool.QueryRow(ctx, "SELECT to_regclass('repositories') IS NULL AND to_regclass('projects') IS NOT NULL").Scan(&removed); err != nil || !removed {
+		t.Fatalf("repository migration down did not preserve projects: removed=%t, error=%v", removed, err)
+	}
+	if err := db.MigrateDown(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
 	if err := pool.QueryRow(ctx, "SELECT to_regclass('projects') IS NULL AND to_regclass('project_audit_logs') IS NULL").Scan(&removed); err != nil || !removed {
 		t.Fatalf("migration down left tables: removed=%t, error=%v", removed, err)
 	}

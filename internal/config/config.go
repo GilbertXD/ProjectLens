@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -12,12 +14,25 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type RepositoryConfig struct {
+	AllowedLocalRoots []string `yaml:"allowed_local_roots"`
+}
+
+type GitHubConfig struct {
+	APIBaseURL string        `yaml:"api_base_url"`
+	Token      string        `yaml:"token"`
+	Timeout    time.Duration `yaml:"timeout"`
+	UserAgent  string        `yaml:"user_agent"`
+}
+
 type Config struct {
-	Database DatabaseConfig `yaml:"database"`
-	App      AppConfig      `yaml:"app"`
-	Server   ServerConfig   `yaml:"server"`
-	Log      LogConfig      `yaml:"log"`
-	CORS     CORSConfig     `yaml:"cors"`
+	Repository RepositoryConfig `yaml:"repository"`
+	GitHub     GitHubConfig     `yaml:"github"`
+	Database   DatabaseConfig   `yaml:"database"`
+	App        AppConfig        `yaml:"app"`
+	Server     ServerConfig     `yaml:"server"`
+	Log        LogConfig        `yaml:"log"`
+	CORS       CORSConfig       `yaml:"cors"`
 }
 
 type DatabaseConfig struct {
@@ -99,6 +114,8 @@ type CORSConfig struct {
 
 func defaults() Config {
 	return Config{
+		Repository: RepositoryConfig{AllowedLocalRoots: []string{}},
+		GitHub:     GitHubConfig{APIBaseURL: "https://api.github.com", Timeout: 10 * time.Second, UserAgent: "ProjectLens"},
 		Database: DatabaseConfig{
 			DSN:               "postgres://projectlens:projectlens@localhost:5432/projectlens?sslmode=disable",
 			MaxConns:          10,
@@ -179,6 +196,9 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		name   string
 		target *string
 	}{
+		{"GITHUB_API_BASE_URL", &cfg.GitHub.APIBaseURL},
+		{"GITHUB_TOKEN", &cfg.GitHub.Token},
+		{"GITHUB_USER_AGENT", &cfg.GitHub.UserAgent},
 		{"APP_NAME", &cfg.App.Name},
 		{"DATABASE_URL", &cfg.Database.DSN},
 		{"APP_ENV", &cfg.App.Env},
@@ -226,6 +246,7 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		name   string
 		target *time.Duration
 	}{
+		{"GITHUB_TIMEOUT", &cfg.GitHub.Timeout},
 		{"DB_MAX_CONN_LIFETIME", &cfg.Database.MaxConnLifetime},
 		{"DB_MAX_CONN_IDLE_TIME", &cfg.Database.MaxConnIdleTime},
 		{"DB_HEALTH_CHECK_PERIOD", &cfg.Database.HealthCheckPeriod},
@@ -244,6 +265,14 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		}
 	}
 
+	if value, ok := lookupEnv("REPO_ALLOWED_LOCAL_ROOTS"); ok {
+		cfg.Repository.AllowedLocalRoots = []string{}
+		if strings.TrimSpace(value) != "" {
+			for _, root := range strings.Split(value, ",") {
+				cfg.Repository.AllowedLocalRoots = append(cfg.Repository.AllowedLocalRoots, strings.TrimSpace(root))
+			}
+		}
+	}
 	if value, ok := lookupEnv("CORS_ALLOWED_ORIGINS"); ok {
 		cfg.CORS.AllowedOrigins = []string{}
 		for _, origin := range strings.Split(value, ",") {
@@ -256,6 +285,21 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 }
 
 func (cfg Config) Validate() error {
+	for _, root := range cfg.Repository.AllowedLocalRoots {
+		if !filepath.IsAbs(root) || strings.ContainsRune(root, 0) {
+			return errors.New("repository.allowed_local_roots (REPO_ALLOWED_LOCAL_ROOTS) must contain absolute paths without NUL")
+		}
+	}
+	endpoint, err := url.Parse(cfg.GitHub.APIBaseURL)
+	if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Hostname() == "" {
+		return errors.New("github.api_base_url (GITHUB_API_BASE_URL) must be an HTTP or HTTPS URL with a host")
+	}
+	if cfg.GitHub.Timeout <= 0 {
+		return errors.New("github.timeout (GITHUB_TIMEOUT) must be positive")
+	}
+	if strings.TrimSpace(cfg.GitHub.UserAgent) == "" {
+		return errors.New("github.user_agent (GITHUB_USER_AGENT) must not be blank")
+	}
 	if strings.TrimSpace(cfg.Database.DSN) == "" {
 		return errors.New("database.dsn (DATABASE_URL) must not be empty")
 	}

@@ -12,6 +12,8 @@ import (
 
 	"projectlens/internal/config"
 	"projectlens/internal/db"
+	"projectlens/internal/github"
+	"projectlens/internal/gitrepo"
 	"projectlens/internal/handler"
 	"projectlens/internal/logger"
 	"projectlens/internal/repository"
@@ -68,10 +70,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 	}
-	projects := service.NewProjectService(repository.NewPostgresProjectRepository(pool), db.NewPgxTxManager(pool))
+	projectStore := repository.NewPostgresProjectRepository(pool)
+	projects := service.NewProjectService(projectStore, db.NewPgxTxManager(pool))
+	repositories := service.NewRepositoryService(projectStore, repository.NewPostgresRepositoryStore(pool),
+		gitrepo.NewLocalInspector(cfg.Repository.AllowedLocalRoots), github.NewClient(cfg.GitHub, nil))
 	routes := router.New(cfg, log, router.Dependencies{
-		Projects: handler.NewProjectHandler(projects, log),
-		Pinger:   pool,
+		Projects:     handler.NewProjectHandler(projects, log),
+		Repositories: handler.NewRepositoryHandler(repositories, log),
+		Pinger:       pool,
 	})
 	if err := server.New(cfg, log, routes).Run(ctx); err != nil {
 		fmt.Fprintf(stderr, "run server: %v\n", err)

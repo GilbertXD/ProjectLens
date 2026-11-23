@@ -190,3 +190,58 @@ func TestDatabaseConfiguration(t *testing.T) {
 		}
 	}
 }
+
+func TestRepositoryConfig(t *testing.T) {
+	cfg, err := load("", env(nil))
+	if err != nil || cfg.Repository.AllowedLocalRoots == nil || len(cfg.Repository.AllowedLocalRoots) != 0 ||
+		cfg.GitHub != (GitHubConfig{APIBaseURL: "https://api.github.com", Timeout: 10 * time.Second, UserAgent: "ProjectLens"}) {
+		t.Fatal("unexpected repository configuration defaults", err)
+	}
+	path := writeConfig(t, `
+repository:
+  allowed_local_roots: [/yaml]
+github:
+  api_base_url: http://localhost:8000
+  token: yaml-value
+  timeout: 2s
+  user_agent: YAML
+`)
+	cfg, err = load(path, env(nil))
+	if err != nil || !reflect.DeepEqual(cfg.Repository.AllowedLocalRoots, []string{"/yaml"}) ||
+		cfg.GitHub != (GitHubConfig{APIBaseURL: "http://localhost:8000", Token: "yaml-value", Timeout: 2 * time.Second, UserAgent: "YAML"}) {
+		t.Fatal("unexpected repository YAML configuration", err)
+	}
+	cfg, err = load(path, env(map[string]string{
+		"REPO_ALLOWED_LOCAL_ROOTS": "/one, /two", "GITHUB_API_BASE_URL": "https://example.com/api",
+		"GITHUB_TOKEN": "env-value", "GITHUB_TIMEOUT": "3s", "GITHUB_USER_AGENT": "Environment",
+	}))
+	if err != nil || !reflect.DeepEqual(cfg.Repository.AllowedLocalRoots, []string{"/one", "/two"}) ||
+		cfg.GitHub != (GitHubConfig{APIBaseURL: "https://example.com/api", Token: "env-value", Timeout: 3 * time.Second, UserAgent: "Environment"}) {
+		t.Fatal("unexpected repository environment configuration", err)
+	}
+	cfg, err = load(path, env(map[string]string{"REPO_ALLOWED_LOCAL_ROOTS": ""}))
+	if err != nil || len(cfg.Repository.AllowedLocalRoots) != 0 {
+		t.Fatal("empty environment variable should clear configured roots", err)
+	}
+}
+
+func TestInvalidRepositoryConfig(t *testing.T) {
+	for _, tc := range []struct{ key, value string }{
+		{"REPO_ALLOWED_LOCAL_ROOTS", "relative"}, {"REPO_ALLOWED_LOCAL_ROOTS", "/absolute,"}, {"REPO_ALLOWED_LOCAL_ROOTS", "/x\x00"},
+		{"GITHUB_API_BASE_URL", "ftp://example.com"}, {"GITHUB_API_BASE_URL", "https://"}, {"GITHUB_API_BASE_URL", "://bad"},
+		{"GITHUB_TIMEOUT", "0s"}, {"GITHUB_TIMEOUT", "-5s"}, {"GITHUB_TIMEOUT", "invalid"}, {"GITHUB_USER_AGENT", " "},
+	} {
+		t.Run(tc.key+"/"+tc.value, func(t *testing.T) {
+			if _, err := load("", env(map[string]string{tc.key: tc.value})); err == nil || !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("expected validation error for %s, got %v", tc.key, err)
+			}
+		})
+	}
+	for _, yaml := range []string{
+		"repository: {allowed_local_root: []}", "github: {time_out: 3s}", "repository: {allowed_local_roots: ['']}",
+	} {
+		if _, err := load(writeConfig(t, yaml), env(nil)); err == nil {
+			t.Errorf("accepted invalid YAML %s", yaml)
+		}
+	}
+}

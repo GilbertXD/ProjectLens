@@ -7,3 +7,9 @@ var (
 	ErrNotFound     = errors.New("project not found")
 	ErrConflict     = errors.New("project slug already exists")
 )
+
+var (
+	ErrForbidden           = errors.New("forbidden")
+	ErrRateLimited         = errors.New("upstream rate limit exceeded")
+	ErrUpstreamUnavailable = errors.New("upstream service unavailable")
+)
