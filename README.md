@@ -132,3 +132,32 @@ The built-in types are `mock.echo` (optional `delay_ms`), `mock.sleep` (`duratio
 A worker renews its lease while an attempt runs. An expired lease lets another worker retry the job if attempts remain. A cancellation request takes precedence during recovery. Job handlers should honor context cancellation and make external side effects safe to repeat because a worker can lose its lease after performing work. The enqueue idempotency key deduplicates job creation.
 
 To run the PostgreSQL lifecycle, concurrency, and API integration tests, point `TEST_DATABASE_URL` at a PostgreSQL database whose user can create schemas and run `make test-integration`.
+
+### Scan a repository
+
+Associate the repository with a project, then submit a scan through the jobs API.
+
+```sh
+curl -X POST http://localhost:8080/api/v1/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"repository.scan","payload":{"project_id":"<project UUID>","repository_id":"<repository UUID>","ref":"main"}}'
+```
+
+Omit `ref` to scan `HEAD`. A ref can also be a branch, tag, or commit SHA. The job result contains commit metadata, a sorted manifest with Git blob IDs and SHA-256 hashes, skip reasons, and scan totals. It contains no file contents. Local scans use committed Git objects, including when the index or working tree has pending changes. Local repositories and their Git directories must be inside the worker's `REPO_ALLOWED_LOCAL_ROOTS`. With Docker Compose, paths and mounts must be accessible inside the container that runs the job.
+
+Public GitHub scans fetch into a bare cache owned by the worker. `GITHUB_TOKEN` is optional. Configure the scanner via the `scanner` YAML section or these environment variables:
+
+| YAML key | Environment variable | Default |
+| --- | --- | --- |
+| `cache_dir` | `SCANNER_CACHE_DIR` | `projectlens-git-cache` under the OS temp directory |
+| `git_timeout` | `SCANNER_GIT_TIMEOUT` | `2m` per scan |
+| `max_file_size` | `SCANNER_MAX_FILE_SIZE` | `1048576` bytes |
+| `max_total_bytes` | `SCANNER_MAX_TOTAL_BYTES` | `52428800` bytes |
+| `max_files` | `SCANNER_MAX_FILES` | `10000` |
+| `max_path_length` | `SCANNER_MAX_PATH_LENGTH` | `512` bytes |
+| `max_path_depth` | `SCANNER_MAX_PATH_DEPTH` | `32` path components |
+| `exclude_patterns` | `SCANNER_EXCLUDE_PATTERNS` | Empty |
+
+Custom exclusions add to the built-in exclusions for paths such as `node_modules`, `vendor`, and `dist`. Specify comma-separated Go path globs in the environment. A pattern without a slash matches individual path components. A pattern with a slash matches paths relative to the repository root, including parent directories.
+
+Set `TEST_SCAN_LOCAL_REPO` and `TEST_SCAN_REMOTE_REPO` to exercise the live scanner smoke tests with `go test -run '^TestLive' ./internal/gitscan`.

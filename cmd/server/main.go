@@ -14,6 +14,7 @@ import (
 	"projectlens/internal/db"
 	"projectlens/internal/github"
 	"projectlens/internal/gitrepo"
+	"projectlens/internal/gitscan"
 	"projectlens/internal/handler"
 	"projectlens/internal/logger"
 	"projectlens/internal/repository"
@@ -73,11 +74,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	projectStore := repository.NewPostgresProjectRepository(pool)
 	projects := service.NewProjectService(projectStore, db.NewPgxTxManager(pool))
-	repositories := service.NewRepositoryService(projectStore, repository.NewPostgresRepositoryStore(pool),
+	repositoryStore := repository.NewPostgresRepositoryStore(pool)
+	repositories := service.NewRepositoryService(projectStore, repositoryStore,
 		gitrepo.NewLocalInspector(cfg.Repository.AllowedLocalRoots), github.NewClient(cfg.GitHub, nil))
 	registry := &worker.Registry{}
 	if err := worker.RegisterMockHandlers(registry); err != nil {
 		fmt.Fprintf(stderr, "register job handlers: %v\n", err)
+		return 1
+	}
+	scanner := gitscan.NewScanner(cfg.Scanner, cfg.Repository, cfg.GitHub)
+	if err := worker.RegisterScanHandler(registry, repositoryStore, scanner); err != nil {
+		fmt.Fprintf(stderr, "register repository scan handler: %v\n", err)
 		return 1
 	}
 	jobStore := repository.NewPostgresJobStore(pool)

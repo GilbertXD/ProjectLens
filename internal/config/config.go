@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -25,7 +26,73 @@ type GitHubConfig struct {
 	UserAgent  string        `yaml:"user_agent"`
 }
 
+type ScannerConfig struct {
+	CacheDir        string        `yaml:"cache_dir"`
+	GitTimeout      time.Duration `yaml:"git_timeout"`
+	MaxFileSize     int64         `yaml:"max_file_size"`
+	MaxTotalBytes   int64         `yaml:"max_total_bytes"`
+	MaxFiles        int           `yaml:"max_files"`
+	MaxPathLength   int           `yaml:"max_path_length"`
+	MaxPathDepth    int           `yaml:"max_path_depth"`
+	ExcludePatterns []string      `yaml:"exclude_patterns"`
+}
+
+func DefaultScannerConfig() ScannerConfig {
+	return ScannerConfig{
+		GitTimeout: 2 * time.Minute, MaxFileSize: 1 << 20, MaxTotalBytes: 50 << 20,
+		MaxFiles: 10000, MaxPathLength: 512, MaxPathDepth: 32,
+	}
+}
+
+func (cfg *ScannerConfig) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: scanner must be a mapping", node.Line)
+	}
+	for i := 0; i < len(node.Content); i += 2 {
+		key, value := node.Content[i], node.Content[i+1]
+		switch key.Value {
+		case "max_file_size", "max_total_bytes", "max_files", "max_path_length", "max_path_depth":
+			if value.Kind == yaml.AliasNode {
+				value = value.Alias
+			}
+			if value.ShortTag() != "!!int" {
+				return fmt.Errorf("line %d: scanner.%s must be an integer", value.Line, key.Value)
+			}
+		case "cache_dir", "git_timeout", "exclude_patterns":
+		default:
+			return fmt.Errorf("line %d: unknown scanner field %q", key.Line, key.Value)
+		}
+	}
+	type plain ScannerConfig
+	return node.Decode((*plain)(cfg))
+}
+
+func (cfg ScannerConfig) Validate() error {
+	if cfg.CacheDir != "" && (!filepath.IsAbs(cfg.CacheDir) || strings.ContainsRune(cfg.CacheDir, 0)) {
+		return errors.New("scanner.cache_dir (SCANNER_CACHE_DIR) must be an absolute path without NUL")
+	}
+	if cfg.GitTimeout <= 0 {
+		return errors.New("scanner.git_timeout (SCANNER_GIT_TIMEOUT) must be positive")
+	}
+	if cfg.MaxFileSize <= 0 || cfg.MaxTotalBytes < cfg.MaxFileSize {
+		return errors.New("scanner.max_file_size (SCANNER_MAX_FILE_SIZE) must be positive and max_total_bytes (SCANNER_MAX_TOTAL_BYTES) must be at least max_file_size")
+	}
+	if cfg.MaxFiles <= 0 || cfg.MaxPathLength <= 0 || cfg.MaxPathDepth <= 0 {
+		return errors.New("scanner.max_files (SCANNER_MAX_FILES), max_path_length (SCANNER_MAX_PATH_LENGTH) and max_path_depth (SCANNER_MAX_PATH_DEPTH) must be positive")
+	}
+	for i, pattern := range cfg.ExcludePatterns {
+		if strings.TrimSpace(pattern) == "" || strings.ContainsRune(pattern, 0) {
+			return fmt.Errorf("scanner.exclude_patterns (SCANNER_EXCLUDE_PATTERNS) entry %d must be nonblank and contain no NUL", i+1)
+		}
+		if _, err := path.Match(pattern, ""); err != nil {
+			return fmt.Errorf("scanner.exclude_patterns (SCANNER_EXCLUDE_PATTERNS) entry %d: %w", i+1, err)
+		}
+	}
+	return nil
+}
+
 type Config struct {
+	Scanner    ScannerConfig    `yaml:"scanner"`
 	Worker     WorkerConfig     `yaml:"worker"`
 	Repository RepositoryConfig `yaml:"repository"`
 	GitHub     GitHubConfig     `yaml:"github"`
@@ -152,6 +219,7 @@ type CORSConfig struct {
 
 func defaults() Config {
 	return Config{
+		Scanner: DefaultScannerConfig(),
 		Worker: WorkerConfig{
 			Mode:               "embedded",
 			Concurrency:        4,
@@ -246,6 +314,7 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		name   string
 		target *string
 	}{
+		{"SCANNER_CACHE_DIR", &cfg.Scanner.CacheDir},
 		{"WORKER_MODE", &cfg.Worker.Mode},
 		{"WORKER_ID", &cfg.Worker.ID},
 		{"GITHUB_API_BASE_URL", &cfg.GitHub.APIBaseURL},
@@ -283,6 +352,9 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		name   string
 		target *int
 	}{
+		{"SCANNER_MAX_FILES", &cfg.Scanner.MaxFiles},
+		{"SCANNER_MAX_PATH_LENGTH", &cfg.Scanner.MaxPathLength},
+		{"SCANNER_MAX_PATH_DEPTH", &cfg.Scanner.MaxPathDepth},
 		{"WORKER_CONCURRENCY", &cfg.Worker.Concurrency},
 		{"WORKER_DEFAULT_MAX_ATTEMPTS", &cfg.Worker.DefaultMaxAttempts},
 	} {
@@ -313,6 +385,7 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		name   string
 		target *time.Duration
 	}{
+		{"SCANNER_GIT_TIMEOUT", &cfg.Scanner.GitTimeout},
 		{"WORKER_POLL_INTERVAL", &cfg.Worker.PollInterval},
 		{"WORKER_LEASE_DURATION", &cfg.Worker.LeaseDuration},
 		{"WORKER_HEARTBEAT_INTERVAL", &cfg.Worker.HeartbeatInterval},
@@ -339,6 +412,30 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		}
 	}
 
+	for _, field := range []struct {
+		name   string
+		target *int64
+	}{
+		{"SCANNER_MAX_FILE_SIZE", &cfg.Scanner.MaxFileSize},
+		{"SCANNER_MAX_TOTAL_BYTES", &cfg.Scanner.MaxTotalBytes},
+	} {
+		if value, ok := lookupEnv(field.name); ok {
+			number, err := strconv.ParseInt(value, 10, 64)
+			if err != nil {
+				return fmt.Errorf("%s must be a 64-bit integer: %w", field.name, err)
+			}
+			*field.target = number
+		}
+	}
+	if value, ok := lookupEnv("SCANNER_EXCLUDE_PATTERNS"); ok {
+		cfg.Scanner.ExcludePatterns = nil
+		if value != "" {
+			for _, pattern := range strings.Split(value, ",") {
+				cfg.Scanner.ExcludePatterns = append(cfg.Scanner.ExcludePatterns, strings.TrimSpace(pattern))
+			}
+		}
+	}
+
 	if value, ok := lookupEnv("REPO_ALLOWED_LOCAL_ROOTS"); ok {
 		cfg.Repository.AllowedLocalRoots = []string{}
 		if strings.TrimSpace(value) != "" {
@@ -359,6 +456,9 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 }
 
 func (cfg Config) Validate() error {
+	if err := cfg.Scanner.Validate(); err != nil {
+		return err
+	}
 	w := cfg.Worker
 	switch w.Mode {
 	case "embedded", "external", "disabled":

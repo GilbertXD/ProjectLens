@@ -299,3 +299,63 @@ func TestWorkerIDRejectsNUL(t *testing.T) {
 		t.Fatalf("expected worker ID validation error, got %v", err)
 	}
 }
+
+func TestScannerConfig(t *testing.T) {
+	cfg, err := load("", env(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Scanner.CacheDir != "" || cfg.Scanner.GitTimeout != 2*time.Minute ||
+		cfg.Scanner.MaxFileSize != 1048576 || cfg.Scanner.MaxTotalBytes != 52428800 ||
+		cfg.Scanner.MaxFiles != 10000 || cfg.Scanner.MaxPathLength != 512 || cfg.Scanner.MaxPathDepth != 32 {
+		t.Fatalf("unexpected scanner defaults: %+v", cfg.Scanner)
+	}
+	path := writeConfig(t, "scanner:\n  max_files: 17\n  exclude_patterns: ['*.tmp']\n")
+	overrides := map[string]string{
+		"SCANNER_CACHE_DIR": t.TempDir(), "SCANNER_GIT_TIMEOUT": "15s",
+		"SCANNER_MAX_FILE_SIZE": "10737418240", "SCANNER_MAX_TOTAL_BYTES": "21474836480",
+		"SCANNER_MAX_PATH_LENGTH": "64", "SCANNER_MAX_PATH_DEPTH": "8",
+		"SCANNER_EXCLUDE_PATTERNS": " generated, *.log ",
+	}
+	cfg, err = load(path, env(overrides))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := cfg.Scanner
+	if s.CacheDir != overrides["SCANNER_CACHE_DIR"] || s.GitTimeout != 15*time.Second || s.MaxFileSize != 10737418240 ||
+		s.MaxTotalBytes != 21474836480 || s.MaxFiles != 17 || s.MaxPathLength != 64 || s.MaxPathDepth != 8 ||
+		strings.Join(s.ExcludePatterns, ",") != "generated,*.log" {
+		t.Fatalf("unexpected scanner overrides: %+v", s)
+	}
+
+	for _, value := range []string{"max_file_size: 1.0", "max_total_bytes: '12'", "max_files: 0",
+		"max_path_length: 1.5", "max_path_depth: -1", "git_timeout: 0s", "cache_dir: ./cache", "max_total_bytes: 2", "unknown: 1"} {
+		path := writeConfig(t, "scanner:\n  "+value+"\n")
+		if _, err := load(path, env(nil)); err == nil {
+			t.Errorf("accepted scanner config %q", value)
+		}
+	}
+	for name, value := range map[string]string{
+		"SCANNER_MAX_FILES": "1.5", "SCANNER_MAX_TOTAL_BYTES": "9223372036854775808", "SCANNER_CACHE_DIR": "/tmp/\x00cache",
+	} {
+		if _, err := load("", env(map[string]string{name: value})); err == nil || !strings.Contains(err.Error(), name) {
+			t.Errorf("accepted %s=%q", name, value)
+		}
+	}
+}
+
+func TestScannerRejectsInvalidExcludePatterns(t *testing.T) {
+	for _, pattern := range []string{"", " ", "a\x00b", "foo["} {
+		cfg := DefaultScannerConfig()
+		cfg.ExcludePatterns = []string{pattern}
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "SCANNER_EXCLUDE_PATTERNS") {
+			t.Errorf("Validate pattern %q returned %v", pattern, err)
+		}
+	}
+	for _, value := range []string{"generated,", "generated, ,*.log", "foo[", "a\x00b"} {
+		_, err := load("", env(map[string]string{"SCANNER_EXCLUDE_PATTERNS": value}))
+		if err == nil || !strings.Contains(err.Error(), "SCANNER_EXCLUDE_PATTERNS") {
+			t.Errorf("loading SCANNER_EXCLUDE_PATTERNS=%q returned %v", value, err)
+		}
+	}
+}
