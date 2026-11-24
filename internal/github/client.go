@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -43,6 +44,13 @@ func NewClient(cfg config.GitHubConfig, client *http.Client) *Client {
 }
 
 func (c *Client) Fetch(ctx context.Context, owner, repo string) (Metadata, error) {
+	return c.fetch(ctx, owner, repo, false)
+}
+
+func (c *Client) PublicActivityMetadata(ctx context.Context, owner, repo string) (Metadata, error) {
+	return c.fetch(ctx, owner, repo, true)
+}
+func (c *Client) fetch(ctx context.Context, owner, repo string, activity bool) (Metadata, error) {
 	if !validRepo(owner, repo) {
 		return Metadata{}, fmt.Errorf("%w: invalid GitHub repository name", domain.ErrInvalidInput)
 	}
@@ -66,14 +74,11 @@ func (c *Client) Fetch(ctx context.Context, owner, repo string) (Metadata, error
 		return Metadata{}, fmt.Errorf("%w: GitHub request failed", domain.ErrUpstreamUnavailable)
 	}
 	defer res.Body.Close()
-	switch {
-	case res.StatusCode == http.StatusNotFound:
-		return Metadata{}, fmt.Errorf("%w: GitHub repository not found", domain.ErrNotFound)
-	case res.StatusCode == http.StatusTooManyRequests ||
-		(res.StatusCode == http.StatusForbidden && res.Header.Get("X-RateLimit-Remaining") == "0"):
-		return Metadata{}, fmt.Errorf("%w: GitHub rate limit reached", domain.ErrRateLimited)
-	case res.StatusCode != http.StatusOK:
-		return Metadata{}, fmt.Errorf("%w: GitHub returned HTTP %d", domain.ErrUpstreamUnavailable, res.StatusCode)
+	if err := activityStatus(res); err != nil {
+		if !activity && !errors.Is(err, domain.ErrNotFound) && !errors.Is(err, domain.ErrRateLimited) {
+			return Metadata{}, domain.ErrUpstreamUnavailable
+		}
+		return Metadata{}, err
 	}
 
 	var data struct {

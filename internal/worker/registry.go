@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"projectlens/internal/domain"
 )
@@ -29,6 +30,10 @@ func ErrorCode(err error) string {
 	var permanent *PermanentError
 	if errors.As(err, &permanent) && permanent.Code != "" {
 		return permanent.Code
+	}
+	var rate interface{ RetryAfter() time.Duration }
+	if errors.As(err, &rate) {
+		return "github_rate_limit"
 	}
 	return "handler_error"
 }

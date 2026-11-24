@@ -185,8 +185,13 @@ func (r *Runner) execute(active context.Context, job domain.Job, token uuid.UUID
 		updated, err = r.store.CompleteFailed(completion, job.ID, r.id, token, "timeout", context.DeadlineExceeded.Error(), true, r.retryDelay(job.Attempt))
 	case handlerErr != nil:
 		var permanent *PermanentError
+		delay := r.retryDelay(job.Attempt)
+		var rate interface{ RetryAfter() time.Duration }
+		if errors.As(handlerErr, &rate) {
+			delay = max(delay, rate.RetryAfter())
+		}
 		updated, err = r.store.CompleteFailed(completion, job.ID, r.id, token, ErrorCode(handlerErr), handlerErr.Error(),
-			!errors.As(handlerErr, &permanent), r.retryDelay(job.Attempt))
+			!errors.As(handlerErr, &permanent), delay)
 	default:
 		updated, err = r.store.CompleteSucceeded(completion, job.ID, r.id, token, result)
 		if err == nil && !updated {

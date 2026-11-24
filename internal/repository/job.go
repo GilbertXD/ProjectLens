@@ -227,6 +227,9 @@ func (s *PostgresJobStore) CreateSync(ctx context.Context, job domain.Job, targe
 		if err != nil {
 			return err
 		}
+		if job.Type == "repository.github_activity.sync" && (source != "github" || target.Ref != "HEAD") {
+			return fmt.Errorf("%w: activity sync requires a GitHub repository and no ref", domain.ErrInvalidInput)
+		}
 		if job.IdempotencyKey != nil {
 			existing, e := s.GetByIdempotencyKey(ctx, *job.IdempotencyKey)
 			if e == nil {

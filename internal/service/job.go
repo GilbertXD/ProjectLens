@@ -80,7 +80,7 @@ func (s *JobService) Enqueue(ctx context.Context, input domain.CreateJobInput) (
 		}
 		job.RunAt = input.RunAt.UTC()
 	}
-	if job.Type == "repository.sync" || job.Type == "repository.commits.sync" {
+	if job.Type == "repository.sync" || job.Type == "repository.commits.sync" || job.Type == "repository.github_activity.sync" {
 		var target domain.SyncTarget
 		decoder := json.NewDecoder(bytes.NewReader(payload))
 		decoder.DisallowUnknownFields()

@@ -945,6 +945,134 @@ paths:
         "200": {"description": "Active job reused"}
         "202": {"description": "Job queued"}
         "409": {"description": "Different ref active"}
+  "/api/v1/projects/{id}/repositories/{repoId}/github-activity/sync":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+    post:
+      operationId: syncGitHubActivity
+      summary: "Synchronize public GitHub activity"
+      security: [{BearerAuth: []}]
+      responses:
+        "200": {"description": "Active job reused"}
+        "202": {"description": "Job queued"}
+        "400": {"description": "Expected GitHub repository"}
+  "/api/v1/projects/{id}/issues":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"in": "query", "name": "limit", "required": false, "schema": {"type": "integer"}}
+      - {"in": "query", "name": "offset", "required": false, "schema": {"type": "integer"}}
+    get:
+      operationId: listProjectIssues
+      summary: "List issues"
+      security: [{BearerAuth: []}]
+      responses:
+        "200": {"description": "Activity page"}
+        "400": {"description": "Invalid request"}
+  "/api/v1/projects/{id}/repositories/{repoId}/issues":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+      - {"in": "query", "name": "limit", "required": false, "schema": {"type": "integer"}}
+      - {"in": "query", "name": "offset", "required": false, "schema": {"type": "integer"}}
+    get:
+      operationId: listRepositoryIssues
+      summary: "List issues"
+      security: [{BearerAuth: []}]
+      responses:
+        "200": {"description": "Activity page"}
+        "400": {"description": "Invalid request"}
+  "/api/v1/projects/{id}/repositories/{repoId}/issues/{number}":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+      - {"in": "path", "name": "number", "required": true, "schema": {"type": "string"}}
+    get:
+      operationId: issuesDetail
+      summary: "issues detail"
+      security: [{BearerAuth: []}]
+      responses:
+        "200": {"description": "Activity result"}
+        "404": {"description": "Resource not found"}
+  "/api/v1/projects/{id}/repositories/{repoId}/issues/{number}/comments":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+      - {"in": "path", "name": "number", "required": true, "schema": {"type": "string"}}
+      - {"in": "query", "name": "limit", "required": false, "schema": {"type": "integer"}}
+      - {"in": "query", "name": "offset", "required": false, "schema": {"type": "integer"}}
+    get:
+      operationId: issuesComments
+      summary: "issues comments"
+      security: [{BearerAuth: []}]
+      responses:
+        "200": {"description": "Activity result"}
+        "404": {"description": "Resource not found"}
+  "/api/v1/projects/{id}/pulls":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"in": "query", "name": "limit", "required": false, "schema": {"type": "integer"}}
+      - {"in": "query", "name": "offset", "required": false, "schema": {"type": "integer"}}
+    get:
+      operationId: listProjectPulls
+      summary: "List pulls"
+      security: [{BearerAuth: []}]
+      responses:
+        "200": {"description": "Activity page"}
+        "400": {"description": "Invalid request"}
+  "/api/v1/projects/{id}/repositories/{repoId}/pulls":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+      - {"in": "query", "name": "limit", "required": false, "schema": {"type": "integer"}}
+      - {"in": "query", "name": "offset", "required": false, "schema": {"type": "integer"}}
+    get:
+      operationId: listRepositoryPulls
+      summary: "List pulls"
+      security: [{BearerAuth: []}]
+      responses:
+        "200": {"description": "Activity page"}
+        "400": {"description": "Invalid request"}
+  "/api/v1/projects/{id}/repositories/{repoId}/pulls/{number}":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+      - {"in": "path", "name": "number", "required": true, "schema": {"type": "string"}}
+    get:
+      operationId: pullsDetail
+      summary: "pulls detail"
+      security: [{BearerAuth: []}]
+      responses:
+        "200": {"description": "Activity result"}
+        "404": {"description": "Resource not found"}
+  "/api/v1/projects/{id}/repositories/{repoId}/pulls/{number}/comments":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+      - {"in": "path", "name": "number", "required": true, "schema": {"type": "string"}}
+      - {"in": "query", "name": "limit", "required": false, "schema": {"type": "integer"}}
+      - {"in": "query", "name": "offset", "required": false, "schema": {"type": "integer"}}
+    get:
+      operationId: pullsComments
+      summary: "pulls comments"
+      security: [{BearerAuth: []}]
+      responses:
+        "200": {"description": "Activity result"}
+        "404": {"description": "Resource not found"}
+  "/api/v1/projects/{id}/repositories/{repoId}/pulls/{number}/commits":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+      - {"in": "path", "name": "number", "required": true, "schema": {"type": "string"}}
+      - {"in": "query", "name": "limit", "required": false, "schema": {"type": "integer"}}
+      - {"in": "query", "name": "offset", "required": false, "schema": {"type": "integer"}}
+    get:
+      operationId: pullsCommits
+      summary: "pulls commits"
+      security: [{BearerAuth: []}]
+      responses:
+        "200": {"description": "Activity result"}
+        "404": {"description": "Resource not found"}
 components:
   securitySchemes:
     BearerAuth:

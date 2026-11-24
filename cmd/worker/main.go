@@ -12,6 +12,7 @@ import (
 
 	"projectlens/internal/config"
 	"projectlens/internal/db"
+	"projectlens/internal/github"
 	"projectlens/internal/gitscan"
 	"projectlens/internal/logger"
 	"projectlens/internal/repository"
@@ -92,6 +93,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer snapshotStore.Close()
+	activity := &service.ActivityService{Repositories: repositoryStore, Locks: snapshotStore, Client: github.NewClient(cfg.GitHub, nil), Tx: db.NewPgxTxManager(pool)}
+	if err := worker.RegisterTarget(registry, "repository.github_activity.sync", activity.Sync); err != nil {
+		log.Error("register activity handler", "error", err)
+		return 1
+	}
 	history := &service.HistoryService{Repositories: repositoryStore, Locks: snapshotStore, Scanner: scanner, Tx: db.NewPgxTxManager(pool)}
 	if err := worker.RegisterTarget(registry, "repository.commits.sync", history.Sync); err != nil {
 		log.Error("register history handler", "error", err)

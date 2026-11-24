@@ -34,6 +34,7 @@ func NewJobHandler(service JobService, log *slog.Logger) *JobHandler {
 
 func (h *JobHandler) Register(api *gin.RouterGroup) {
 	api.POST("/projects/:id/repositories/:repoId/sync", h.syncRepository("repository.sync"))
+	api.POST("/projects/:id/repositories/:repoId/github-activity/sync", h.syncRepository("repository.github_activity.sync"))
 	api.POST("/projects/:id/repositories/:repoId/commits/sync", h.syncRepository("repository.commits.sync"))
 	jobs := api.Group("/jobs")
 	jobs.POST("", h.enqueue)
