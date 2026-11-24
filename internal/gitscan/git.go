@@ -5,66 +5,207 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
+	"projectlens/internal/domain"
+	"projectlens/internal/gitrepo"
 	"projectlens/internal/telemetry"
 )
 
 type gitRunner struct {
 	token     string
 	allowHTTP bool
+	cacheDir  string
 }
 
 func (g gitRunner) command(ctx context.Context, auth bool, args ...string) *exec.Cmd {
-	protocol := "https"
-	if g.allowHTTP {
-		protocol = "http"
+	if err := g.validateCommand(args); err != nil {
+		return &exec.Cmd{Err: err}
 	}
-	flags := []string{
-		"--no-replace-objects",
-		"-c", "core.hooksPath=/dev/null",
-		"-c", "core.symlinks=false",
-		"-c", "core.fsmonitor=false",
-		"-c", "submodule.recurse=false",
-		"-c", "credential.helper=",
-		"-c", "protocol.allow=never",
-		"-c", "protocol.file.allow=never",
-		"-c", "protocol." + protocol + ".allow=always",
-		"-c", "http.followRedirects=false",
-		"-c", "fetch.writeCommitGraph=false",
-		"-c", "gc.auto=0",
+	fetch := len(args) > 1 && args[1] == "fetch"
+	protocol := ""
+	if fetch || args[0] == "ls-remote" {
+		protocol = g.protocol()
 	}
-	cmd := exec.CommandContext(ctx, "git", append(flags, args...)...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		if errors.Is(err, syscall.ESRCH) {
-			return os.ErrProcessDone
-		}
-		return err
-	}
-	cmd.WaitDelay = time.Second
-	for _, entry := range os.Environ() {
-		if !strings.HasPrefix(entry, "GIT_") && !strings.HasPrefix(entry, "LC_ALL=") {
-			cmd.Env = append(cmd.Env, entry)
-		}
-	}
-	allowedProtocol := ""
-	if auth || len(args) > 0 && args[0] == "ls-remote" {
-		allowedProtocol = protocol
-	}
-	cmd.Env = append(cmd.Env, "LC_ALL=C", "GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_NOSYSTEM=1",
-		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_OPTIONAL_LOCKS=0", "GIT_SSH_COMMAND=false", "GIT_ASKPASS=",
-		"GIT_NO_LAZY_FETCH=1", "GIT_ALLOW_PROTOCOL="+allowedProtocol)
-	if auth && g.token != "" && !g.allowHTTP {
+	cmd := gitrepo.GitCommand(ctx, protocol, append([]string{"-c", "http.followRedirects=false"}, args...)...)
+	// All commands use explicit Git directories, absolute init paths or URLs.
+	// Avoid picking up the application working directory's Git config.
+	cmd.Dir = "/"
+	if fetch && auth && g.token != "" && !g.allowHTTP {
 		cmd.Env = append(cmd.Env, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.https://github.com/.extraHeader",
 			"GIT_CONFIG_VALUE_0=Authorization: Bearer "+g.token)
 	}
 	return cmd
+}
+
+func (g gitRunner) protocol() string {
+	if g.allowHTTP {
+		return "http"
+	}
+	return "https"
+}
+
+func (g gitRunner) remoteURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && u.Scheme == g.protocol() && u.Hostname() != "" && u.User == nil
+}
+
+// validateCommand permits only the command forms used by the scanner. Read
+// commands can otherwise accept options that write output or run diff drivers.
+func (g gitRunner) validateCommand(args []string) error {
+	forbidden := fmt.Errorf("%w: Git command is outside the scanner capability", domain.ErrForbidden)
+	if len(args) == 0 {
+		return forbidden
+	}
+	switch args[0] {
+	case "init":
+		if len(args) == 4 && slices.Equal(args[1:3], []string{"--bare", "--template="}) && g.inCache(args[3], true) {
+			return nil
+		}
+	case "ls-remote":
+		if len(args) == 4 && args[1] == "--" && g.remoteURL(args[2]) && args[3] == "HEAD" {
+			return nil
+		}
+	default:
+		dir, ok := strings.CutPrefix(args[0], "--git-dir=")
+		if !ok || !filepath.IsAbs(dir) || len(args) < 2 {
+			return forbidden
+		}
+		if args[1] == "fetch" {
+			if g.validFetch(args[2:]) && g.inCache(dir, false) {
+				return nil
+			}
+		} else if readOnlyCommand(args[1], args[2:]) {
+			return nil
+		}
+	}
+	return forbidden
+}
+
+func (g gitRunner) inCache(dir string, allowMissing bool) bool {
+	if g.cacheDir == "" || !filepath.IsAbs(dir) || dir != filepath.Clean(dir) {
+		return false
+	}
+	root, err := filepath.EvalSymlinks(g.cacheDir)
+	if err != nil || !filepath.IsAbs(root) {
+		return false
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(dir))
+	if err != nil {
+		return false
+	}
+	target := filepath.Join(parent, filepath.Base(dir))
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == "." || !filepath.IsLocal(rel) {
+		return false
+	}
+	info, err := os.Lstat(target)
+	if errors.Is(err, os.ErrNotExist) {
+		return allowMissing
+	}
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	if allowMissing {
+		entries, err := os.ReadDir(target)
+		return err == nil && len(entries) == 0
+	}
+	return validateCacheTree(target) == nil
+}
+
+// Cache entries are standalone bare repositories. Git follows metadata paths
+// when fetching, so refuse entries that can redirect a write outside the cache.
+func validateCacheTree(dir string) error {
+	forbidden := fmt.Errorf("%w: Git cache contains an indirect metadata path", domain.ErrForbidden)
+	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == filepath.Join(dir, "commondir") || path == filepath.Join(dir, "objects", "info", "alternates") {
+			return forbidden
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			return forbidden
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || stat.Nlink != 1 {
+			return forbidden
+		}
+		return nil
+	})
+}
+
+func (g gitRunner) validFetch(args []string) bool {
+	if len(args) < 6 || !slices.Equal(args[:3], []string{"--no-tags", "--prune", "--no-auto-maintenance"}) {
+		return false
+	}
+	args = args[3:]
+	if raw, ok := strings.CutPrefix(args[0], "--depth="); ok {
+		depth, err := strconv.Atoi(raw)
+		if err != nil || depth < 1 {
+			return false
+		}
+		args = args[1:]
+	}
+	if len(args) != 3 || args[0] != "--" || !g.remoteURL(args[1]) {
+		return false
+	}
+	ref, err := NormalizeRef(args[2])
+	return err == nil && args[2] == ref
+}
+
+func readOnlyCommand(command string, args []string) bool {
+	switch command {
+	case "rev-parse":
+		return true
+	case "cat-file":
+		return slices.Equal(args, []string{"--batch"}) ||
+			len(args) == 2 && args[0] == "commit" && validOID(args[1])
+	case "show":
+		if len(args) == 0 || !validOID(args[len(args)-1]) {
+			return false
+		}
+		return slices.Equal(args[:len(args)-1], []string{"--no-patch", "--no-notes", "--no-show-signature", "--format=%B"}) ||
+			len(args) == 6 && slices.Equal(args[:4], []string{"-s", "--no-show-signature", "--no-notes", "--encoding=UTF-8"}) &&
+				args[4] == "--format=%H%x00%T%x00%P%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%s"
+	case "ls-tree":
+		return len(args) == 4 && slices.Equal(args[:3], []string{"-r", "-l", "-z"}) && validOID(args[3])
+	case "rev-list":
+		if len(args) != 4 || args[0] != "--topo-order" || !validOID(args[2]) || args[3] != "--" {
+			return false
+		}
+		count, ok := strings.CutPrefix(args[1], "--max-count=")
+		n, err := strconv.Atoi(count)
+		return ok && err == nil && n > 0
+	case "diff-tree":
+		flags := []string{"--no-commit-id", "--no-ext-diff", "--no-textconv", "-r", "-M", "-l256", "-z"}
+		if len(args) != len(flags)+4 || !slices.Equal(args[:len(flags)], flags) {
+			return false
+		}
+		args = args[len(flags):]
+		return (args[0] == "--name-status" || args[0] == "--numstat") &&
+			(args[1] == "--root" || validOID(args[1])) && validOID(args[2]) && args[3] == "--"
+	case "diff":
+		flags := []string{"--no-color", "--no-ext-diff", "--no-textconv", "--submodule=short", "-O/dev/null", "-M", "-l256"}
+		return len(args) == len(flags)+3 && slices.Equal(args[:len(flags)], flags) &&
+			validOID(args[len(flags)]) && validOID(args[len(flags)+1]) && args[len(flags)+2] == "--"
+	}
+	return false
 }
 
 type boundedOutput struct {
@@ -97,6 +238,9 @@ func (g gitRunner) run(ctx context.Context, limit int, auth bool, args ...string
 	ctx, span := telemetry.Span(ctx, "git.command")
 	defer span.End()
 	cmd := g.command(ctx, auth, args...)
+	if cmd.Err != nil {
+		return nil, cmd.Err
+	}
 	stdout := &boundedOutput{limit: limit}
 	stderr := &boundedOutput{limit: 8192}
 	cmd.Stdout, cmd.Stderr = stdout, stderr

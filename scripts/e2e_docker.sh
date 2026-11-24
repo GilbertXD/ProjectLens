@@ -96,6 +96,8 @@ services:
         condition: service_healthy
   worker:
     image: "${E2E_IMAGE}"
+    volumes:
+      - "${E2E_FIXTURE_DIR}/local:/fixtures/local:ro"
   github-fixture:
     build: "${E2E_FIXTURE_BUILD_DIR}"
     volumes:
@@ -203,6 +205,21 @@ wait_ready() {
 }
 
 wait_ready ok
+compose exec -T api sh -ec '
+  test -d /fixtures/local/worktree
+  if touch /fixtures/local/worktree/.write-probe; then
+    echo "API can write to the local source mount" >&2
+    exit 1
+  fi
+'
+# Use the owner of /app so the probe tests the mount instead of file permissions.
+compose exec -T -u 0 api sh -ec '
+  test -d /app
+  if touch /app/.write-probe; then
+    echo "API root filesystem is writable" >&2
+    exit 1
+  fi
+'
 request 200 GET /openapi.yaml no
 grep -Eq '^openapi: "?3\.0\.3"?$' "$body"
 request 200 GET /openapi.json no
@@ -255,6 +272,9 @@ import_and_sync() {
   wait_job "$(jq -er '.job_id' "$body")"
   commit="$(jq -er '.result | select(.status == "published") | .commit_hash' "$body")"
   local scoped="$project_api/repositories/$repo"
+  if [[ "$kind" == local_git ]]; then
+    local_repo_api="$scoped"
+  fi
   request 202 POST "$scoped/commits/sync" yes '{"ref":"main"}'
   wait_job "$(jq -er '.job_id' "$body")"
   request 200 GET "$scoped/commits?ref=main" yes
@@ -335,6 +355,13 @@ for ((i=0;i<100;i++)); do
   sleep 0.2
 done
 jq -e '.last_error_code=="unknown_job_type" and .attempt==1' "$body" >/dev/null
+request 204 DELETE "$local_repo_api" yes
+request 404 GET "$local_repo_api" yes
+compose exec -T api sh -ec '
+  test -f /fixtures/local/worktree/.git/HEAD
+  test -f /fixtures/local/worktree/local.txt
+  grep -qx "deliveryquasar indexed fixture" /fixtures/local/worktree/local.txt
+'
 compose logs --no-color > "$scratch/logs"
 if grep -Fq "$token" "$scratch/logs"; then
   echo "Bearer token leaked in container logs" >&2

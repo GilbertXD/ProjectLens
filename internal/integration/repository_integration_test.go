@@ -1,13 +1,18 @@
 package integration
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
+	"io/fs"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,6 +23,14 @@ import (
 	"projectlens/internal/config"
 	"projectlens/internal/db"
 	"projectlens/internal/domain"
+	"projectlens/internal/github"
+	"projectlens/internal/gitrepo"
+	"projectlens/internal/gitscan"
+	"projectlens/internal/handler"
+	"projectlens/internal/repository"
+	"projectlens/internal/router"
+	"projectlens/internal/service"
+	"projectlens/internal/worker"
 )
 
 func TestRepositoryLifecycle(t *testing.T) {
@@ -164,4 +177,172 @@ func TestRepositoryLifecycle(t *testing.T) {
 	if err := pool.QueryRow(t.Context(), "SELECT count(*) FROM repositories WHERE project_id = $1", project.ID).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("project deletion left %d repositories: %v", count, err)
 	}
+}
+
+func TestReadOnlySourceRepositoryLifecycle(t *testing.T) {
+	cfg, pool, jobs, registry, jobService := jobFixture(t)
+	cfg.Scanner = config.DefaultScannerConfig()
+	cfg.Sync = config.SyncConfig{RetainSuperseded: 2, FailedRetention: 24 * time.Hour}
+	dir, base := deliveryGitRepo(t, "tracked.txt", "original")
+	if err := os.WriteFile(filepath.Join(dir, "tracked.txt"), []byte("updated\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	syncGit(t, dir, "add", "--", "tracked.txt")
+	syncGit(t, dir, "commit", "-m", "update fixture")
+	head := syncGit(t, dir, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(dir, "untracked.txt"), []byte("work tree only\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	type sourceEntry struct {
+		Mode os.FileMode
+		Hash [sha256.Size]byte
+	}
+	capture := func(makeReadOnly bool) map[string]sourceEntry {
+		t.Helper()
+		entries := make(map[string]sourceEntry)
+		err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			mode := info.Mode()
+			if makeReadOnly && mode&os.ModeSymlink == 0 {
+				original := mode.Perm()
+				mode = mode.Type() | 0400
+				if d.IsDir() {
+					mode |= 0100
+				}
+				if err := os.Chmod(path, mode.Perm()); err != nil {
+					return err
+				}
+				t.Cleanup(func() {
+					if err := os.Chmod(path, original); err != nil {
+						t.Error(err)
+					}
+				})
+			}
+			var data []byte
+			switch {
+			case mode.IsRegular():
+				data, err = os.ReadFile(path)
+			case mode&os.ModeSymlink != 0:
+				var target string
+				target, err = os.Readlink(path)
+				data = []byte(target)
+			}
+			if err != nil {
+				return err
+			}
+			entries[path] = sourceEntry{Mode: mode, Hash: sha256.Sum256(data)}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return entries
+	}
+	baseline := capture(true)
+	assertIntact := func(stage string) {
+		t.Helper()
+		actual := capture(false)
+		if reflect.DeepEqual(baseline, actual) {
+			return
+		}
+		for path, want := range baseline {
+			got, exists := actual[path]
+			if !exists {
+				t.Errorf("%s removed %s", stage, path)
+			} else if want != got {
+				t.Errorf("%s changed %s", stage, path)
+			}
+		}
+		for path := range actual {
+			if _, exists := baseline[path]; !exists {
+				t.Errorf("%s added %s", stage, path)
+			}
+		}
+		t.FailNow()
+	}
+
+	cfg.Repository.AllowedLocalRoots = []string{dir}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	tx := db.NewPgxTxManager(pool)
+	projectStore := repository.NewPostgresProjectRepository(pool)
+	repos := repository.NewPostgresRepositoryStore(pool)
+	snapshots, err := repository.NewPostgresSnapshotStore(t.Context(), pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(snapshots.Close)
+	scanner := gitscan.NewScanner(cfg.Scanner, cfg.Repository, cfg.GitHub)
+	syncer := service.NewSyncService(repos, snapshots, tx, scanner, cfg.Sync, log)
+	history := &service.HistoryService{Repositories: repos, Locks: snapshots, Scanner: scanner, Tx: tx}
+	if err := worker.RegisterSyncHandler(registry, syncer); err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.RegisterTarget(registry, "repository.commits.sync", history.Sync); err != nil {
+		t.Fatal(err)
+	}
+	startJobWorker(t, cfg.Worker, jobs, registry)
+	srv := httptest.NewServer(router.New(cfg, log, router.Dependencies{
+		Projects: handler.NewProjectHandler(service.NewProjectService(projectStore, tx), log),
+		Repositories: handler.NewRepositoryHandler(service.NewRepositoryService(projectStore, repos,
+			gitrepo.NewLocalInspector(cfg.Repository.AllowedLocalRoots), github.NewClient(cfg.GitHub, nil)), log),
+		Snapshots: handler.NewSnapshotHandler(syncer, log),
+		History:   &handler.HistoryHandler{Service: history, Log: log},
+		Jobs:      handler.NewJobHandler(jobService, log),
+		Pinger:    pool,
+	}))
+	t.Cleanup(srv.Close)
+
+	var project domain.Project
+	request(t, srv, "POST", projects, `{"slug":"source-readonly","name":"Read-only source"}`, 201, &project)
+	projectPath := projects + "/" + project.ID.String()
+	association, err := json.Marshal(domain.AssociateRepositoryInput{SourceType: domain.RepositorySourceLocalGit, Source: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var repo domain.Repository
+	request(t, srv, "POST", projectPath+"/repositories", string(association), 201, &repo)
+	repoPath := projectPath + "/repositories/" + repo.ID.String()
+	for _, suffix := range []string{"/sync", "/commits/sync"} {
+		var queued struct {
+			JobID uuid.UUID `json:"job_id"`
+		}
+		request(t, srv, "POST", repoPath+suffix, `{"ref":"main"}`, 202, &queued)
+		job := waitJob(t, jobs, queued.JobID, func(j domain.Job) bool {
+			return j.Status == domain.JobSucceeded || j.Status == domain.JobFailed || j.Status == domain.JobCancelled
+		})
+		if job.Status != domain.JobSucceeded {
+			t.Fatalf("%s failed: %+v", suffix, job)
+		}
+	}
+	var snapshot domain.Snapshot
+	request(t, srv, "GET", repoPath+"/snapshots/active", "", 200, &snapshot)
+	if snapshot.CommitHash != head {
+		t.Fatalf("active snapshot commit = %s, want %s", snapshot.CommitHash, head)
+	}
+	var compare struct {
+		Total int    `json:"total"`
+		Patch string `json:"patch"`
+	}
+	request(t, srv, "GET", repoPath+"/compare?base="+base+"&head="+head, "", 200, &compare)
+	if compare.Total != 1 || !strings.Contains(compare.Patch, "+updated") {
+		t.Fatalf("unexpected comparison: %+v", compare)
+	}
+	request(t, srv, "POST", repoPath+"/refresh-metadata", "", 200, &repo)
+	assertIntact("association, sync, compare and metadata refresh")
+
+	request(t, srv, "DELETE", repoPath, "", 204, nil)
+	request(t, srv, "GET", repoPath, "", 404, nil)
+	assertIntact("repository association deletion")
+
+	request(t, srv, "POST", projectPath+"/repositories", string(association), 201, &repo)
+	request(t, srv, "DELETE", projectPath, "", 204, nil)
+	request(t, srv, "GET", projectPath+"/repositories/"+repo.ID.String(), "", 404, nil)
+	assertIntact("project deletion with an associated repository")
 }

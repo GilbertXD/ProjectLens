@@ -13,6 +13,7 @@ import (
 	"projectlens/internal/config"
 	"projectlens/internal/db"
 	"projectlens/internal/github"
+	"projectlens/internal/gitrepo"
 	"projectlens/internal/gitscan"
 	"projectlens/internal/logger"
 	"projectlens/internal/repository"
@@ -60,6 +61,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		"auth_enabled", cfg.Auth.Enabled, "auth_token_count", len(cfg.Auth.BearerTokens),
 		"concurrency", cfg.Worker.Concurrency, "lease_duration", cfg.Worker.LeaseDuration)
 	defer log.Info("worker stopped")
+	gitrepo.LogLocalRootMounts(log, cfg.Repository.AllowedLocalRoots)
 	if cfg.App.Env == "production" && !cfg.Auth.Enabled {
 		log.Warn("API authentication is disabled in production", "auth_enabled", false)
 	}

@@ -15,6 +15,9 @@ x-runtime-defaults: &runtime-defaults
 services:
   api:
     <<: *runtime-defaults
+    read_only: true
+    cap_drop: ["ALL"]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
     build: *app-build
     mem_limit: 768m
     cpus: 2.0
@@ -111,6 +114,9 @@ services:
 
   worker:
     <<: *runtime-defaults
+    read_only: true
+    cap_drop: ["ALL"]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
     mem_limit: 768m
     cpus: 2.0
     pids_limit: 256
@@ -131,6 +137,9 @@ services:
 
   migrate:
     <<: *runtime-defaults
+    read_only: true
+    cap_drop: ["ALL"]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
     restart: "no"
     mem_limit: 256m
     cpus: 1.0

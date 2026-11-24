@@ -1,0 +1,17 @@
+services:
+  api:
+    environment:
+      REPO_ALLOWED_LOCAL_ROOTS: /repos
+    volumes:
+      - &local-repos
+        type: bind
+        source: "${PROJECTLENS_LOCAL_REPOS:-./repos}"
+        target: /repos
+        read_only: true
+        bind:
+          create_host_path: false
+  worker:
+    environment:
+      REPO_ALLOWED_LOCAL_ROOTS: /repos
+    volumes:
+      - *local-repos

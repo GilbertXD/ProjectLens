@@ -47,12 +47,50 @@ func NewClient(cfg config.GitHubConfig, client *http.Client) *Client {
 		transport = http.DefaultTransport
 	}
 	configured.Transport = observedTransport{transport}
+	checkRedirect := configured.CheckRedirect
+	configured.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		host, scheme := via[0].URL.Host, via[0].URL.Scheme
+		validate := func() error {
+			if !readOnlyMethod(req.Method) || !strings.EqualFold(req.URL.Host, host) || req.URL.Scheme != scheme {
+				return fmt.Errorf("%w: GitHub redirect must use a read-only method on the original origin", domain.ErrForbidden)
+			}
+			return nil
+		}
+		if err := validate(); err != nil {
+			return err
+		}
+		if cfg.Token != "" && req.Response != nil {
+			if err := validateTokenScopes(req.Response); err != nil {
+				return err
+			}
+		}
+		if checkRedirect != nil {
+			if err := checkRedirect(req, via); err != nil {
+				return err
+			}
+			return validate()
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
 	return &Client{config: cfg, http: &configured}
 }
 
 type observedTransport struct{ next http.RoundTripper }
 
+func readOnlyMethod(method string) bool {
+	return method == http.MethodGet || method == http.MethodHead
+}
+
 func (t observedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if !readOnlyMethod(req.Method) {
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		return nil, fmt.Errorf("%w: GitHub client only permits read-only HTTP methods", domain.ErrForbidden)
+	}
 	ctx, span := telemetry.Span(req.Context(), "github.request")
 	defer span.End()
 	start := time.Now()
@@ -64,6 +102,18 @@ func (t observedTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	telemetry.GitHub.WithLabelValues(telemetry.StatusClass(status)).Observe(time.Since(start).Seconds())
 	return res, err
 }
+func validateTokenScopes(res *http.Response) error {
+	for _, header := range res.Header.Values("X-OAuth-Scopes") {
+		for scope := range strings.SplitSeq(header, ",") {
+			scope = strings.TrimSpace(scope)
+			if scope != "" && !strings.HasPrefix(scope, "read:") {
+				return fmt.Errorf("%w: GitHub token grants write or elevated scopes; use a read-only fine-grained token or zero-scope public token", domain.ErrForbidden)
+			}
+		}
+	}
+	return nil
+}
+
 func (c *Client) Fetch(ctx context.Context, owner, repo string) (Metadata, error) {
 	return c.fetch(ctx, owner, repo, false)
 }
@@ -92,9 +142,17 @@ func (c *Client) fetch(ctx context.Context, owner, repo string, activity bool) (
 
 	res, err := c.http.Do(req)
 	if err != nil {
+		if errors.Is(err, domain.ErrForbidden) {
+			return Metadata{}, err
+		}
 		return Metadata{}, fmt.Errorf("%w: GitHub request failed", domain.ErrUpstreamUnavailable)
 	}
 	defer res.Body.Close()
+	if c.config.Token != "" {
+		if err := validateTokenScopes(res); err != nil {
+			return Metadata{}, err
+		}
+	}
 	if err := activityStatus(res); err != nil {
 		if !activity && !errors.Is(err, domain.ErrNotFound) && !errors.Is(err, domain.ErrRateLimited) {
 			return Metadata{}, domain.ErrUpstreamUnavailable

@@ -69,7 +69,7 @@ func (f *ActivityFeed) request(ctx context.Context, path string, q url.Values, e
 	f.remaining--
 	endpoint := f.root.JoinPath(path)
 	endpoint.RawQuery = q.Encode()
-	req, err := http.NewRequestWithContext(ctx, "GET", endpoint.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
 		return nil, 0, domain.ErrInvalidInput
 	}
@@ -84,9 +84,17 @@ func (f *ActivityFeed) request(ctx context.Context, path string, q url.Values, e
 	}
 	res, err := f.client.http.Do(req)
 	if err != nil {
+		if errors.Is(err, domain.ErrForbidden) {
+			return nil, 0, err
+		}
 		return nil, 0, fmt.Errorf("%w: GitHub request failed", domain.ErrUpstreamUnavailable)
 	}
 	defer res.Body.Close()
+	if f.client.config.Token != "" {
+		if err := validateTokenScopes(res); err != nil {
+			return nil, 0, err
+		}
+	}
 	if res.StatusCode == 304 && etag != "" {
 		return res.Header, 304, nil
 	}

@@ -172,6 +172,14 @@ List responses contain `items`, `total`, `limit`, and `offset`. Error responses 
 | `github.timeout` | `GITHUB_TIMEOUT` | `10s` |
 | `github.user_agent` | `GITHUB_USER_AGENT` | `ProjectLens` |
 
+### Source repository security
+
+ProjectLens reads local Git and public GitHub repositories into controlled PostgreSQL snapshots. Standalone Markdown documents are editable in PostgreSQL. Deleting a repository association or its project leaves the source repository intact. The only Git writes are to ProjectLens's dedicated bare cache for remote fetches.
+
+Compose runs the API, worker, and migrator with read-only root filesystems (`read_only: true`), all Linux capabilities dropped (`cap_drop: [ALL]`), and a `noexec,nosuid` tmpfs at `/tmp`. The local repository override mounts the host sources read-only at `/repos` on both the API and worker. Native deployments without OS-level read-only mounts or read-only permissions for the service account rely on application-level guards. [Compose example](docker-compose.local-repos.example.yml) · [Deployment details](docs/OPERATIONS.md#source-repository-isolation)
+
+Use GitHub anonymously or set `GITHUB_TOKEN` to a fine-grained read-only token or a zero-scope classic personal access token. The GitHub API client rejects elevated classic token scopes at runtime.
+
 ## Background jobs
 
 The API writes jobs to PostgreSQL and returns immediately. By default, the server runs an embedded worker. Set `WORKER_MODE=external` to run the API and worker as separate processes, or `WORKER_MODE=disabled` to run the API without a local worker. Both API-only modes still accept jobs. Pending jobs wait for an available worker.
@@ -226,7 +234,7 @@ curl -X POST http://localhost:8080/api/v1/jobs \
   -d '{"type":"repository.scan","payload":{"project_id":"<project UUID>","repository_id":"<repository UUID>","ref":"main"}}'
 ```
 
-Omit `ref` to scan `HEAD`. A ref can also be a branch, tag, or commit SHA. The job result contains commit metadata, a sorted manifest with Git blob IDs and SHA-256 hashes, skip reasons, and scan totals. It contains no file contents. Local scans use committed Git objects, including when the index or working tree has pending changes. Local repositories and their Git directories must be inside the worker's `REPO_ALLOWED_LOCAL_ROOTS`. With Docker Compose, paths and mounts must be accessible inside the container that runs the job.
+Omit `ref` to scan `HEAD`. A ref can also be a branch, tag, or commit SHA. The job result contains commit metadata, a sorted manifest with Git blob IDs and SHA-256 hashes, skip reasons, and scan totals. It contains no file contents. Local scans use committed Git objects, including when the index or working tree has pending changes. Local repositories, Git directories, and alternate object stores must be inside the worker's `REPO_ALLOWED_LOCAL_ROOTS`. With Docker Compose, supply the container path under the read-only bind mount.
 
 Public GitHub scans fetch into a bare cache owned by the worker. `GITHUB_TOKEN` is optional. Configure the scanner via the `scanner` YAML section or these environment variables:
 

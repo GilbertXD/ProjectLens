@@ -164,8 +164,17 @@ func TestGitTokenStaysInEnvironmentAndOutOfErrors(t *testing.T) {
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GIT_TRACE", "1")
-	runner := gitRunner{token: token}
-	cmd := runner.command(context.Background(), true, "fetch")
+	cache := t.TempDir()
+	target := filepath.Join(cache, "test.git")
+	if err := os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	runner := gitRunner{token: token, cacheDir: cache}
+	args := []string{"--git-dir=" + target, "fetch", "--no-tags", "--prune", "--no-auto-maintenance", "--", "https://github.com/owner/project.git", "HEAD"}
+	cmd := runner.command(context.Background(), true, args...)
+	if cmd.Err != nil {
+		t.Fatal(cmd.Err)
+	}
 	if strings.Contains(strings.Join(cmd.Args, " "), token) || !strings.Contains(strings.Join(cmd.Env, "\n"), "Authorization: Bearer "+token) {
 		t.Fatal("the token must be passed in the command environment")
 	}
@@ -174,7 +183,7 @@ func TestGitTokenStaysInEnvironmentAndOutOfErrors(t *testing.T) {
 			t.Fatal("inherited Git tracing is enabled")
 		}
 	}
-	_, err := runner.run(t.Context(), 1024, true, "fetch")
+	_, err := runner.run(t.Context(), 1024, true, args...)
 	if err == nil || strings.Contains(gitDiagnostic(err), token) || !strings.Contains(gitDiagnostic(err), "[redacted]") || strings.Contains(err.Error(), token) ||
 		strings.Contains(remoteError(err).Error(), token) {
 		t.Fatal("token unexpectedly surfaced in an error")
@@ -220,7 +229,11 @@ exit 0
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if err := fetchCommit(t.Context(), gitRunner{}, dir, "https://github.com/owner/project.git", "HEAD", 1); err != nil {
+	target := filepath.Join(dir, "test.git")
+	if err := os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := fetchCommit(t.Context(), gitRunner{cacheDir: dir}, target, "https://github.com/owner/project.git", "HEAD", 1); err != nil {
 		t.Fatal(err)
 	}
 }

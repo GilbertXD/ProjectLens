@@ -92,9 +92,18 @@ func (s *RemoteSource) Prepare(ctx context.Context, spec SourceSpec) (*PreparedR
 	if !info.IsDir() || info.Mode().Perm()&0022 != 0 || !ok || ownerInfo.Uid != uint32(os.Geteuid()) {
 		return nil, errors.New("Git cache must be a directory owned by the worker and writable only by its owner")
 	}
+	cacheDir, err := filepath.Abs(s.cacheDir)
+	if err != nil {
+		return nil, err
+	}
+	cacheDir, err = filepath.EvalSymlinks(cacheDir)
+	if err != nil {
+		return nil, err
+	}
+	git.cacheDir = cacheDir
 	key := fmt.Sprintf("%x", sha256.Sum256([]byte(canonical)))
-	dir := filepath.Join(s.cacheDir, key+".git")
-	release, err := lockCache(ctx, filepath.Join(s.cacheDir, key+".lock"))
+	dir := filepath.Join(cacheDir, key+".git")
+	release, err := lockCache(ctx, filepath.Join(cacheDir, key+".lock"))
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +118,7 @@ func (s *RemoteSource) Prepare(ctx context.Context, spec SourceSpec) (*PreparedR
 	info, err = os.Lstat(dir)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		fetchDir, err = os.MkdirTemp(s.cacheDir, key+"-")
+		fetchDir, err = os.MkdirTemp(cacheDir, key+"-")
 		if err != nil {
 			return nil, err
 		}
@@ -121,6 +130,11 @@ func (s *RemoteSource) Prepare(ctx context.Context, spec SourceSpec) (*PreparedR
 		return nil, err
 	case !info.IsDir():
 		return nil, errors.New("Git cache entry is not a directory")
+	case spec.compareBase != "":
+		// A comparison may resolve both commits without going through fetch.
+		if err := validateCacheTree(dir); err != nil {
+			return nil, err
+		}
 	}
 
 	// Credentials may grant private access. Verify public visibility without them.
@@ -213,7 +227,7 @@ func gitDiagnostic(err error) string {
 }
 
 func remoteError(err error) error {
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, domain.ErrForbidden) {
 		return err
 	}
 	detail := gitDiagnostic(err)

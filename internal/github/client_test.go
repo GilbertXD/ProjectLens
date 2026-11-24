@@ -144,3 +144,121 @@ func TestGitHubFetchSanitizesMetadata(t *testing.T) {
 		})
 	}
 }
+
+func TestGitHubTransportReadOnlyMethods(t *testing.T) {
+	calls := 0
+	transport := observedTransport{transportFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+	})}
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		req, err := http.NewRequestWithContext(t.Context(), method, "https://api.github.com", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := transport.RoundTrip(req); !errors.Is(err, domain.ErrForbidden) {
+			t.Errorf("%s = %v, want forbidden", method, err)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("underlying transport received %d write requests", calls)
+	}
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		req, err := http.NewRequestWithContext(t.Context(), method, "https://api.github.com", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := transport.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("%s: %v", method, err)
+		}
+		_ = res.Body.Close()
+	}
+	if calls != 2 {
+		t.Fatalf("underlying transport received %d read requests", calls)
+	}
+}
+
+func TestGitHubRedirectStaysOnOrigin(t *testing.T) {
+	for _, tc := range []struct {
+		location string
+		want     error
+	}{
+		{"/repos/Canonical/Repo", nil},
+		{"https://sub.api.example.com/repos/Canonical/Repo", domain.ErrForbidden},
+		{"https://other.example.com/repos/Canonical/Repo", domain.ErrForbidden},
+		{"http://api.example.com/repos/Canonical/Repo", domain.ErrForbidden},
+	} {
+		t.Run(tc.location, func(t *testing.T) {
+			calls := 0
+			transport := transportFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				if req.URL.Host != "api.example.com" || req.URL.Scheme != "https" {
+					t.Errorf("redirect reached another origin with Authorization present = %t", req.Header.Get("Authorization") != "")
+				}
+				if req.Header.Get("Authorization") != "Bearer test-token" {
+					t.Error("request to the original origin had no token")
+				}
+				if calls == 1 {
+					header := make(http.Header)
+					header.Set("Location", tc.location)
+					return &http.Response{StatusCode: http.StatusFound, Header: header, Body: http.NoBody}, nil
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(publicMetadata))}, nil
+			})
+			cfg := config.GitHubConfig{APIBaseURL: "https://api.example.com", Token: "test-token"}
+			_, err := NewClient(cfg, &http.Client{Transport: transport}).Fetch(t.Context(), "owner", "repo")
+			if !errors.Is(err, tc.want) || (tc.want != nil && calls != 1) || (tc.want == nil && calls != 2) {
+				t.Fatalf("Fetch = %v after %d calls, want %v", err, calls, tc.want)
+			}
+		})
+	}
+}
+
+func TestGitHubTokenScopes(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		token  string
+		scopes []string
+		want   error
+	}{
+		{name: "anonymous", scopes: []string{"repo"}},
+		{name: "zero scope", token: "fixture", scopes: []string{""}},
+		{name: "fine grained", token: "fixture"},
+		{name: "read scope", token: "fixture", scopes: []string{"read:org"}},
+		{name: "multiple read scopes", token: "fixture", scopes: []string{"read:org, read:user", "read:packages"}},
+		{name: "repo", token: "fixture", scopes: []string{"repo"}, want: domain.ErrForbidden},
+		{name: "public_repo", token: "fixture", scopes: []string{"public_repo"}, want: domain.ErrForbidden},
+		{name: "delete_repo", token: "fixture", scopes: []string{"delete_repo"}, want: domain.ErrForbidden},
+		{name: "write:org", token: "fixture", scopes: []string{"read:org, write:org"}, want: domain.ErrForbidden},
+		{name: "admin:repo_hook", token: "fixture", scopes: []string{"read:org", "admin:repo_hook"}, want: domain.ErrForbidden},
+		{name: "workflow", token: "fixture", scopes: []string{"workflow"}, want: domain.ErrForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			transport := transportFunc(func(req *http.Request) (*http.Response, error) {
+				header := make(http.Header)
+				for _, scope := range tc.scopes {
+					header.Add("X-OAuth-Scopes", scope)
+				}
+				body := publicMetadata
+				if strings.HasSuffix(req.URL.Path, "/issues") {
+					body = "[]"
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: header, Body: io.NopCloser(strings.NewReader(body))}, nil
+			})
+			cfg := config.GitHubConfig{APIBaseURL: "https://api.example.com", Token: tc.token}
+			client := NewClient(cfg, &http.Client{Transport: transport})
+			if _, err := client.Fetch(t.Context(), "owner", "repo"); !errors.Is(err, tc.want) {
+				t.Errorf("Fetch = %v, want %v", err, tc.want)
+			}
+			feed, err := client.Feed("owner", "repo")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var issues []Activity
+			if _, _, err := feed.request(t.Context(), "issues", nil, "", &issues); !errors.Is(err, tc.want) {
+				t.Errorf("activity = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}

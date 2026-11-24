@@ -51,9 +51,24 @@ Compose uses the `json-file` logging driver with three 10 MB files per service. 
 - Requests to `/api/v1/*` use one Bearer credential when authentication is enabled. The service returns `401` and `WWW-Authenticate: Bearer realm="ProjectLens"` for missing or invalid credentials. CORS preflight and public probes bypass Bearer auth.
 - Use a CORS origin allowlist. Browsers can send `Authorization`, `Content-Type`, and `X-Request-ID` with the default header configuration. For cross-origin conditional writes, add `If-Match` to `cors.allowed_headers` in the service YAML.
 - Responses set `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and `Referrer-Policy: no-referrer`. API responses also set `Cache-Control: no-store`.
-- Local Git paths must resolve under an absolute path in `REPO_ALLOWED_LOCAL_ROOTS`, including their Git directories. Mount explicitly allowed working trees read-only and ensure that Git can read and trust their ownership as the scanner user. An empty allowlist denies local imports.
-- GitHub import accepts public GitHub repository URLs. `GITHUB_GIT_BASE_URL` configures a trusted HTTP(S) mirror for Git fetches. `GITHUB_API_BASE_URL` configures the metadata endpoint. The GitHub token is scoped to GitHub fetches and is omitted on Git fetches to a mirror.
 - The global HTTP body and raw document JSON limits return `413 payload_too_large` when exceeded. The decoded Markdown content limit is measured in UTF-8 bytes and returns `400 invalid_input` when exceeded. Git limits bound file count, bytes, and path shape during scans.
+
+## Source repository isolation
+
+ProjectLens reads local Git and public GitHub repositories into controlled snapshots stored in PostgreSQL. Standalone Markdown documents are editable in PostgreSQL. Refreshes, syncs, and deletion of a repository association or project affect ProjectLens data. Source repositories receive no writes, and the scanner does not run their hooks, filters, or external diff drivers.
+
+Local Git working trees, Git directories, common directories, and alternate object stores must resolve under an absolute path in `REPO_ALLOWED_LOCAL_ROOTS`. An empty list disables local imports. Ensure the application user can read the repositories and Git trusts their ownership.
+
+Compose runs `api`, `worker`, and `migrate` with `read_only: true`, `cap_drop: [ALL]`, and a `noexec,nosuid` tmpfs mounted at `/tmp`. The writable `scanner_cache` volume on the API and worker stores only ProjectLens's bare remote Git fetch cache. Keep the cache dedicated to ProjectLens and separate from source repositories. To mount local sources in both services, set `PROJECTLENS_LOCAL_REPOS` to an existing host directory and use the [read-only Compose override](../docker-compose.local-repos.example.yml). It binds the host directory as `/repos:ro` and sets the local root allowlist to `/repos`.
+
+```sh
+PROJECTLENS_LOCAL_REPOS=/path/to/host/repos docker compose \
+  -f docker-compose.yml -f docker-compose.local-repos.example.yml up -d
+```
+
+Native host deployments without OS-level read-only mounts or access controls rely on application-level Git guards. For mandatory OS enforcement, use a read-only mount or a dedicated service user with read-only filesystem ACLs. The API and worker report each configured root's mount status at startup and warn when they cannot confirm a read-only mount.
+
+`GITHUB_TOKEN` is optional for public GitHub repositories. Use a fine-grained token with read-only permissions or a zero-scope classic personal access token. The API client allows only GET and HEAD and rejects elevated classic scopes reported by GitHub. `GITHUB_API_BASE_URL` sets the metadata and activity endpoint. `GITHUB_GIT_BASE_URL` can point to a trusted HTTP(S) Git mirror. Git fetches to mirrors omit the token.
 
 ## Tune timeouts and resource limits
 

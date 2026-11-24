@@ -65,6 +65,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		"auth_enabled", cfg.Auth.Enabled, "auth_token_count", len(cfg.Auth.BearerTokens),
 		"max_in_flight", cfg.Server.MaxInFlight, "max_body_bytes", cfg.Server.MaxBodyBytes, "request_timeout", cfg.Server.RequestTimeout, "redis_enabled", cfg.Redis.Enabled)
 	defer log.Info("server stopped")
+	gitrepo.LogLocalRootMounts(log, cfg.Repository.AllowedLocalRoots)
 	if cfg.App.Env == "production" && !cfg.Auth.Enabled {
 		log.Warn("API authentication is disabled in production", "auth_enabled", false)
 	}

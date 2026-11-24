@@ -417,3 +417,153 @@ func TestIncrementalReadAndReuse(t *testing.T) {
 		t.Fatalf("config rescan: %+v, %v", reconfigured, err)
 	}
 }
+
+func TestGitRunnerCommandBoundary(t *testing.T) {
+	cache, outside := t.TempDir(), t.TempDir()
+	dir := filepath.Join(cache, "managed.git")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	escape := filepath.Join(cache, "escape.git")
+	if err := os.Symlink(outside, escape); err != nil {
+		t.Fatal(err)
+	}
+	dangling := filepath.Join(cache, "dangling.git")
+	if err := os.Symlink(filepath.Join(outside, "missing.git"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	runner := gitRunner{cacheDir: cache}
+	gitDir := "--git-dir=" + dir
+	var denied [][]string
+	for _, command := range []string{"push", "commit", "reset", "checkout", "clean", "rm", "update-ref", "gc", "archive", "hash-object"} {
+		denied = append(denied, []string{gitDir, command})
+	}
+	for _, path := range []string{cache, outside, escape, filepath.Join(escape, "child"), dangling} {
+		denied = append(denied,
+			[]string{"init", "--bare", "--template=", path},
+			[]string{"--git-dir=" + path, "fetch", "--no-tags", "--prune", "--no-auto-maintenance", "--", "https://github.com/owner/project.git", "HEAD"})
+	}
+	denied = append(denied,
+		[]string{"-c", "alias.inspection=!touch sentinel", gitDir, "inspection"},
+		[]string{"init", "--bare", "--template=" + outside, dir},
+		[]string{gitDir, "fetch", "--no-tags", "--prune", "--no-auto-maintenance", "--", "file:///source.git", "HEAD"},
+		[]string{gitDir, "fetch", "--no-tags", "--prune", "--no-auto-maintenance", "--", "https://github.com/owner/project.git", "HEAD:refs/heads/main"},
+		[]string{gitDir, "cat-file", "--filters", "HEAD:a.txt"},
+		[]string{gitDir, "diff", "--output=" + filepath.Join(outside, "output")})
+	for _, args := range denied {
+		if _, err := runner.run(t.Context(), 1024, false, args...); !errors.Is(err, domain.ErrForbidden) {
+			t.Errorf("run(%v) = %v, want forbidden", args, err)
+		}
+	}
+	if _, err := (gitRunner{}).run(t.Context(), 1024, false, "init", "--bare", "--template=", dir); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("init without configured cache = %v", err)
+	}
+	if _, err := runner.run(t.Context(), 8192, false, "init", "--bare", "--template=", dir); err != nil {
+		t.Fatalf("init within cache: %v", err)
+	}
+	fetch := []string{gitDir, "fetch", "--no-tags", "--prune", "--no-auto-maintenance", "--depth=1", "--", "https://github.com/owner/project.git", "HEAD"}
+	if cmd := runner.command(t.Context(), true, fetch...); cmd.Err != nil {
+		t.Fatalf("valid confined fetch: %v", cmd.Err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "refs/heads/escape")); err != nil {
+		t.Fatal(err)
+	}
+	if cmd := runner.command(t.Context(), true, fetch...); !errors.Is(cmd.Err, domain.ErrForbidden) {
+		t.Fatalf("fetch with an escaping cache ref = %v, want forbidden", cmd.Err)
+	}
+}
+
+func TestLocalSourceRejectsEscapingAlternates(t *testing.T) {
+	dir, outside := newFixture(t), newFixture(t)
+	writeFixture(t, dir, ".git/objects/info/alternates", filepath.Join(outside, ".git/objects")+"\n", 0600)
+	spec := SourceSpec{SourceType: domain.RepositorySourceLocalGit, Source: dir}
+	if _, err := NewLocalSource([]string{dir}).Prepare(t.Context(), spec); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("Prepare = %v, want forbidden", err)
+	}
+}
+
+func TestLocalScannerIgnoresRepositoryScripts(t *testing.T) {
+	dir := newFixture(t)
+	writeFixture(t, dir, ".gitattributes", "*.txt filter=sentinel diff=sentinel\n", 0600)
+	writeFixture(t, dir, "tracked.txt", "before\n", 0600)
+	fixtureGit(t, dir, "add", ".")
+	base := saveFixture(t, dir)
+	writeFixture(t, dir, "tracked.txt", "after\n", 0600)
+	fixtureGit(t, dir, "add", ".")
+	head := saveFixture(t, dir, base)
+	blob := fixtureGit(t, dir, "rev-parse", "HEAD:tracked.txt")
+
+	sentinel := filepath.Join(t.TempDir(), "invoked")
+	t.Setenv("PROJECTLENS_TEST_SENTINEL", sentinel)
+	script := "#!/bin/sh\nprintf invoked >> \"$PROJECTLENS_TEST_SENTINEL\"\n"
+	writeFixture(t, dir, "sentinel.sh", script, 0700)
+	writeFixture(t, dir, "hooks/reference-transaction", script, 0700)
+	writeFixture(t, dir, "hooks/post-index-change", script, 0700)
+	program := filepath.Join(dir, "sentinel.sh")
+	for key, value := range map[string]string{
+		"core.fsmonitor": program, "core.hooksPath": filepath.Join(dir, "hooks"),
+		"core.alternateRefsCommand": program, "diff.external": program, "diff.textconv": program,
+		"diff.sentinel.command": program, "diff.sentinel.textconv": program,
+		"filter.sentinel.clean": program, "filter.sentinel.smudge": program, "filter.sentinel.process": program,
+	} {
+		fixtureGit(t, dir, "config", key, value)
+	}
+	type entry struct {
+		mode os.FileMode
+		hash [sha256.Size]byte
+	}
+	snapshot := func() map[string]entry {
+		t.Helper()
+		files := make(map[string]entry)
+		err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			item := entry{mode: info.Mode()}
+			if !d.IsDir() {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				item.hash = sha256.Sum256(data)
+			}
+			files[path] = item
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return files
+	}
+
+	before := snapshot()
+	scanner := localScanner(dir, config.DefaultScannerConfig())
+	spec := SourceSpec{SourceType: domain.RepositorySourceLocalGit, Source: dir}
+	if scan, err := scanner.Scan(t.Context(), spec, ScanOptions{}); err != nil || scan.Commit.Hash != head {
+		t.Fatalf("Scan = %+v, %v", scan, err)
+	}
+	if scan, err := scanner.ScanIncremental(t.Context(), spec, nil, ScanOptions{}); err != nil || scan.Commit.Hash != head {
+		t.Fatalf("ScanIncremental = %+v, %v", scan, err)
+	}
+	missing := func(ids []string) (map[string]bool, error) { return map[string]bool{base: true, head: true}, nil }
+	save := func(HistoryCommit, Changes) error { return nil }
+	if page, err := scanner.History(t.Context(), spec, 2, missing, save); err != nil || page.Imported != 2 {
+		t.Fatalf("History = %+v, %v", page, err)
+	}
+	if changes, err := scanner.Compare(t.Context(), spec, base, head); err != nil || !strings.Contains(changes.Patch, "+after") {
+		t.Fatalf("Compare = %+v, %v", changes, err)
+	}
+	if data, err := scanner.ReadBlob(t.Context(), spec, head, blob); err != nil || string(data) != "after\n" {
+		t.Fatalf("ReadBlob = %q, %v", data, err)
+	}
+	if _, err := os.Lstat(sentinel); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("repository script ran: %v", err)
+	}
+	if after := snapshot(); !reflect.DeepEqual(before, after) {
+		t.Fatal("scanner changed source files or Git metadata")
+	}
+}
