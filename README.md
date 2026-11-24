@@ -211,7 +211,7 @@ curl -X POST http://localhost:8080/api/v1/jobs \
 - `GET /api/v1/jobs` accepts `status`, `type`, `limit` (default 20, maximum 100), and `offset`. Use `GET /api/v1/jobs/:id` to inspect the status and result.
 - `POST /api/v1/jobs/:id/cancel` cancels pending jobs immediately and requests cooperative cancellation for running jobs. Cancelling a cancelled job returns its current state. Succeeded and failed jobs return `409`.
 
-The built-in types are `mock.echo` (optional `delay_ms`), `mock.sleep` (`duration_ms`, default 100), `mock.fail` (optional `delay_ms`, `error_message`, and `permanent`), and `mock.flaky` (`succeed_on_attempt`, default 2).
+With `APP_ENV=development` or `test` and `WORKER_ENABLE_MOCK_JOBS=true`, the available mock types are `mock.echo` (optional `delay_ms`), `mock.sleep` (`duration_ms`, default 100), `mock.fail` (optional `delay_ms`, `error_message`, and `permanent`), and `mock.flaky` (`succeed_on_attempt`, default 2).
 
 A worker renews its lease while an attempt runs. An expired lease lets another worker retry the job if attempts remain. A cancellation request takes precedence during recovery. Job handlers should honor context cancellation and make external side effects safe to repeat because a worker can lose its lease after performing work. The enqueue idempotency key deduplicates job creation.
 

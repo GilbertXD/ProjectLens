@@ -59,6 +59,12 @@ func (h *JobHandler) enqueue(c *gin.Context) {
 		h.respond(c, 0, nil, fmt.Errorf("%w: body must contain a single JSON value", domain.ErrInvalidInput))
 		return
 	}
+	switch input.Type {
+	case "repository.scan", "repository.sync", "mock.echo", "mock.sleep", "mock.fail", "mock.flaky":
+	default:
+		h.respond(c, 0, nil, fmt.Errorf("%w: job type is not available on this endpoint", domain.ErrInvalidInput))
+		return
+	}
 	job, created, err := h.service.Enqueue(c.Request.Context(), *input)
 	status := http.StatusOK
 	if created {

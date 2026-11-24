@@ -9,8 +9,16 @@ import (
 	"strings"
 	"time"
 
+	"projectlens/internal/config"
 	"projectlens/internal/domain"
 )
+
+func RegisterConfiguredMocks(r *Registry, cfg config.Config) error {
+	if cfg.Worker.EnableMockJobs && (cfg.App.Env == "development" || cfg.App.Env == "test") {
+		return RegisterMockHandlers(r)
+	}
+	return nil
+}
 
 func RegisterMockHandlers(r *Registry) error {
 	for name, handler := range map[string]HandlerFunc{

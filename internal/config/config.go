@@ -323,6 +323,7 @@ type Config struct {
 }
 
 type WorkerConfig struct {
+	EnableMockJobs     bool          `yaml:"enable_mock_jobs"`
 	Mode               string        `yaml:"mode"`
 	ID                 string        `yaml:"id"`
 	Concurrency        int           `yaml:"concurrency"`
@@ -350,7 +351,7 @@ func (cfg *WorkerConfig) UnmarshalYAML(node *yaml.Node) error {
 			if value.ShortTag() != "!!int" {
 				return fmt.Errorf("line %d: worker.%s must be an integer", value.Line, key.Value)
 			}
-		case "mode", "id", "poll_interval", "lease_duration", "heartbeat_interval", "default_timeout", "retry_base_delay", "retry_max_delay", "shutdown_timeout":
+		case "enable_mock_jobs", "mode", "id", "poll_interval", "lease_duration", "heartbeat_interval", "default_timeout", "retry_base_delay", "retry_max_delay", "shutdown_timeout":
 		default:
 			return fmt.Errorf("line %d: unknown worker field %q", key.Line, key.Value)
 		}
@@ -627,6 +628,7 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 	}{
 		{"AUTH_ENABLED", &cfg.Auth.Enabled},
 		{"DB_AUTO_MIGRATE", &cfg.Database.AutoMigrate},
+		{"WORKER_ENABLE_MOCK_JOBS", &cfg.Worker.EnableMockJobs},
 		{"REDIS_ENABLED", &cfg.Redis.Enabled},
 	} {
 		if value, ok := lookupEnv(field.name); ok {

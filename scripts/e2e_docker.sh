@@ -25,6 +25,8 @@ while IFS= read -r key; do
 done < <(grep -oE '\$\{[A-Z_][A-Z_0-9]*' docker-compose.yml | cut -c3- | sort -u)
 unset COMPOSE_PROFILES COMPOSE_ENV_FILES COMPOSE_PROJECT_NAME COMPOSE_FILE
 cat > "$scratch/env" <<ENV
+APP_ENV=test
+WORKER_ENABLE_MOCK_JOBS=true
 API_PORT=127.0.0.1:0
 POSTGRES_PORT=127.0.0.1:0
 REDIS_PORT=127.0.0.1:0

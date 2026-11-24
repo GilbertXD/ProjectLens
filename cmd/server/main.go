@@ -88,7 +88,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	repositories := service.NewRepositoryService(projectStore, repositoryStore,
 		gitrepo.NewLocalInspector(cfg.Repository.AllowedLocalRoots), github.NewClient(cfg.GitHub, nil))
 	registry := &worker.Registry{}
-	if err := worker.RegisterMockHandlers(registry); err != nil {
+	if err := worker.RegisterConfiguredMocks(registry, cfg); err != nil {
 		fmt.Fprintf(stderr, "register job handlers: %v\n", err)
 		return 1
 	}
