@@ -94,3 +94,45 @@ For rollback, stop new writes and drain workers. Deploy the previous image if it
 ## Delivery checks
 
 Run `make test` for race-enabled Go tests. With `TEST_DATABASE_URL` set to a PostgreSQL test instance, `make test-integration` exercises the integration suites and `make test-e2e` runs full delivery against real PostgreSQL with isolated Redis and GitHub fixtures. Run `make docker-e2e` on a Docker host to check the clean Compose deployment, token handling, local and remote ingestion, search, Redis outage and recovery, and API restart persistence. The script removes its Compose project and volumes when it exits.
+
+
+## Repository synchronization
+
+The manual endpoints and automatic scheduler acquire the repository row in PostgreSQL before checking active jobs and inserting a new one. A worker acquires the existing repository advisory lock before scanning or reconciling. Deploy the schema and replace all API and worker instances together. An older process can still register mock handlers or use the earlier enqueue behavior. In production and staging, persisted mock jobs are claimed and finish with `unknown_job_type`. Inspect their job status through the existing read API.
+
+Commit synchronization pins a tip, imports up to 100 reachable entries initially and expands the published window by up to 100 positions on subsequent runs, to 2,000 positions per ref. A force-push rebuilds the reachability window from the new tip. SHA details for older imported objects remain in PostgreSQL. The worker computes metadata only for missing SHAs. The published tip, ordered SHA list and new records commit in one transaction. Compare reads actual Git objects, which requires the base and head trees to remain available in the local repository or managed Git cache. Retain that cache when comparisons across rewritten history matter. Git command timeouts also bound Compare. File metadata is limited to 500 changes, each Git metadata stream to 256 KiB and each patch and saved message body to 64 KiB. Check `truncated` and `patch_truncated`. A dumb HTTP Git mirror can require a full transfer when shallow fetch is unsupported.
+
+GitHub activity checks public visibility and native repository identity before every batch. The worker uses issue records to discover PR numbers and fetches the actual PR IDs. It reads the repository-wide ordinary and review comment streams separately. PR detail ETags are persisted with the normalized record. Data and the upstream update-time cursor commit together. Incremental scans overlap by two minutes. The first successful scan and the first sync after 24 hours since reconciliation enumerate all pages. Only a successful full reconciliation removes missing rows. A changed PR refreshes its complete commit membership. Page or size limits, inconsistent PR counts and transport errors leave the previous published batch intact.
+
+Each activity run permits 256 list/detail requests plus the visibility check, 50 pages per list, 100 entries per page, 4 MiB per activity response and 32 MiB across those responses. Stored bodies retain 16,384 characters, with a truncation flag. A PR above GitHub's 250-commit REST limit, or a repository exceeding the batch limits, surfaces a job error. Check the job's error before retrying an oversized import. For a rate limit, inspect `last_error_code=github_rate_limit` and `run_at`. The worker honors the longer of its bounded exponential retry delay and the upstream retry/reset deadline. A later scheduler tick also checks the persisted deadline. Verify credentials and repository visibility for permanent permission or not-found errors. The REST behavior is documented by [GitHub Issues](https://docs.github.com/en/rest/issues/issues), [Pull Requests](https://docs.github.com/en/rest/pulls/pulls) and [rate-limit guidance](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api).
+
+The scheduler runs with executing workers. A PostgreSQL clock row admits at most `SCHEDULE_BATCH` (default 4) due policies per five-second window across instances. `SCHEDULE_MIN_INTERVAL_SECONDS` defaults to 60. Enabling a new policy makes it due on the next tick. A long outage coalesces missed intervals into one opportunity per policy. Pending jobs are reused and a conflicting manual ref causes the tick to skip that interval. Disable a policy to stop new scheduled jobs. Use the normal cancellation endpoint for an existing job. Deleting a repository cascades its policies and imported data.
+
+## Metrics and tracing
+
+Set `METRICS_ADDR=127.0.0.1:9090` to enable the separate, loopback-only `/metrics` listener. Leave it empty to disable it. Host processes in the same network namespace need distinct ports. In Compose, inspect the API with `docker compose exec api wget -qO- http://127.0.0.1:9090/metrics` and scrape the worker's own loopback listener for its execution series. Database gauges describe the shared database. Choose one scrape target for queue totals to avoid double counting.
+
+| Metric under `projectlens_` | Interpretation |
+| --- | --- |
+| `http_request_seconds` | Histogram by HTTP status class. Use its count for throughput and the 5xx count for server error rate. |
+| `jobs`, `job_attempt_seconds` | Stored job counts by controlled type and state, and attempt duration by type and outcome. Pending includes delayed retries. |
+| `job_retries_total`, `job_lease_expiries_total` | Started retries and reclaimed leases. Compare their rates with worker logs. |
+| `snapshot_sync_seconds`, `snapshot_files_total`, `snapshot_bytes_total` | Snapshot sync duration and logical scan volume. Fully unchanged snapshots contribute zero scan volume. |
+| `github_request_seconds`, `github_retry_wait_seconds` | REST latency/count by status class and upstream-requested retry delay in seconds. |
+| `search_seconds` | Search latency split by hit, miss, bypass, degraded or error. Compare the degraded and miss buckets during a Redis outage. |
+| `db_connections`, `db_scrape_up` | Application pool connections by state and availability of the PostgreSQL job count query. |
+
+Example PromQL for service-wide request P95 and server error fraction:
+
+```promql
+histogram_quantile(0.95, sum by (le) (rate(projectlens_http_request_seconds_bucket[5m])))
+sum(rate(projectlens_http_request_seconds_count{status_class="5xx"}[5m])) / sum(rate(projectlens_http_request_seconds_count[5m]))
+```
+
+Set `TRACE_ENABLED=true` on API and worker to emit local OpenTelemetry span summaries to structured logs. The default is off. Trace context travels with the PostgreSQL job. Find the repository enqueue event using `X-Request-ID`, then filter API and worker logs by its `trace_id` or `job_id`. The spans cover HTTP, enqueue, worker execution, Git commands, GitHub REST requests, SQL queries, snapshot publication and search. The local exporter records span names, parents, IDs and duration. Example with JSON logs:
+
+```sh
+docker compose logs --no-log-prefix api worker | jq -R 'fromjson? | select(.trace_id == env.TRACE_ID)'
+```
+
+Migrations 7–11 add the active-target index, history, GitHub activity, policies and trace context respectively. Keep a V1 backup before rollout. For rollback, disable schedules and drain the newer workers first. Reversing the history and activity migrations removes imported data and cursors. Reversing the scheduler migration removes policies. Restore from backup or re-import the external data and recreate policies after upgrading again.

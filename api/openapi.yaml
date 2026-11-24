@@ -396,11 +396,21 @@ paths:
           application/json:
             schema: {type: object, additionalProperties: false, properties: {ref: {type: string, default: HEAD}}}
       responses:
-        "202": {description: "Queued. Returns job_id, status and poll_url."}
-        "200": {description: "Active job reused."}
+        "202":
+          description: "Queued. Returns job_id, status and poll_url."
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/SyncReceipt"}
+        "200":
+          description: "Active job reused."
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/SyncReceipt"}
         "400": {"$ref": "#/components/responses/BadRequest"}
         "404": {"$ref": "#/components/responses/NotFound"}
         "409": {description: "Another ref is pending or running."}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "500": {"$ref": "#/components/responses/InternalError"}
   "/api/v1/projects/{id}/repositories/{repoId}/refresh-metadata":
     parameters:
       - {"$ref": "#/components/parameters/id"}
@@ -410,7 +420,7 @@ paths:
       summary: "Refresh repository metadata"
       security:
         - {"BearerAuth": []}
-      description: "To publish searchable Git content, enqueue a repository.sync job with project_id, repository_id and optional ref."
+      description: "To publish searchable Git content, POST to the sibling /sync endpoint."
       responses:
         "200":
           description: "Successful response"
@@ -883,12 +893,18 @@ paths:
       - {"in": "query", "name": "limit", "required": false, "schema": {"type": "integer"}}
     get:
       operationId: listCommits
-      summary: "listCommits"
+      summary: "List commits reachable in the last published ref window"
       security: [{BearerAuth: []}]
       responses:
-        "200": {"description": "History result"}
+        "200":
+          description: "History result"
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/CommitHistoryPage"}
         "400": {"description": "Invalid parameters"}
         "404": {"description": "Repository or history not found"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "500": {"$ref": "#/components/responses/InternalError"}
   "/api/v1/projects/{id}/repositories/{repoId}/commits/{sha}":
     parameters:
       - {"$ref": "#/components/parameters/id"}
@@ -896,12 +912,18 @@ paths:
       - {"in": "path", "name": "sha", "required": true, "schema": {"type": "string"}}
     get:
       operationId: getCommit
-      summary: "getCommit"
+      summary: "Read imported commit metadata by full SHA"
       security: [{BearerAuth: []}]
       responses:
-        "200": {"description": "History result"}
+        "200":
+          description: "History result"
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/CommitHistoryEntry"}
         "400": {"description": "Invalid parameters"}
         "404": {"description": "Repository or history not found"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "500": {"$ref": "#/components/responses/InternalError"}
   "/api/v1/projects/{id}/repositories/{repoId}/commits/{sha}/files":
     parameters:
       - {"$ref": "#/components/parameters/id"}
@@ -911,12 +933,18 @@ paths:
       - {"in": "query", "name": "limit", "required": false, "schema": {"type": "integer"}}
     get:
       operationId: listCommitFiles
-      summary: "listCommitFiles"
+      summary: "List changes against the first parent"
       security: [{BearerAuth: []}]
       responses:
-        "200": {"description": "History result"}
+        "200":
+          description: "History result"
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/FileChangePage"}
         "400": {"description": "Invalid parameters"}
         "404": {"description": "Repository or history not found"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "500": {"$ref": "#/components/responses/InternalError"}
   "/api/v1/projects/{id}/repositories/{repoId}/compare":
     parameters:
       - {"$ref": "#/components/parameters/id"}
@@ -927,12 +955,18 @@ paths:
       - {"in": "query", "name": "limit", "required": false, "schema": {"type": "integer"}}
     get:
       operationId: compareCommits
-      summary: "compareCommits"
+      summary: "Compare two imported commits and return a bounded patch"
       security: [{BearerAuth: []}]
       responses:
-        "200": {"description": "History result"}
+        "200":
+          description: "History result"
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/CommitComparison"}
         "400": {"description": "Invalid parameters"}
         "404": {"description": "Repository or history not found"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "500": {"$ref": "#/components/responses/InternalError"}
   "/api/v1/projects/{id}/repositories/{repoId}/commits/sync":
     parameters:
       - {"$ref": "#/components/parameters/id"}
@@ -941,10 +975,26 @@ paths:
       operationId: syncCommits
       summary: "Import reachable history for the optional JSON ref"
       security: [{BearerAuth: []}]
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: false, properties: {ref: {type: string, default: HEAD}}}
       responses:
-        "200": {"description": "Active job reused"}
-        "202": {"description": "Job queued"}
+        "200":
+          description: "Active job reused"
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/SyncReceipt"}
+        "202":
+          description: "Job queued"
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/SyncReceipt"}
         "409": {"description": "Different ref active"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "500": {"$ref": "#/components/responses/InternalError"}
   "/api/v1/projects/{id}/repositories/{repoId}/github-activity/sync":
     parameters:
       - {"$ref": "#/components/parameters/id"}
@@ -954,9 +1004,20 @@ paths:
       summary: "Synchronize public GitHub activity"
       security: [{BearerAuth: []}]
       responses:
-        "200": {"description": "Active job reused"}
-        "202": {"description": "Job queued"}
+        "200":
+          description: "Active job reused"
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/SyncReceipt"}
+        "202":
+          description: "Job queued"
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/SyncReceipt"}
         "400": {"description": "Expected GitHub repository"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "500": {"$ref": "#/components/responses/InternalError"}
   "/api/v1/projects/{id}/issues":
     parameters:
       - {"$ref": "#/components/parameters/id"}
@@ -967,8 +1028,15 @@ paths:
       summary: "List issues"
       security: [{BearerAuth: []}]
       responses:
-        "200": {"description": "Activity page"}
+        "200":
+          description: "Activity page"
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/ActivityPage"}
         "400": {"description": "Invalid request"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "500": {"$ref": "#/components/responses/InternalError"}
   "/api/v1/projects/{id}/repositories/{repoId}/issues":
     parameters:
       - {"$ref": "#/components/parameters/id"}
@@ -980,8 +1048,15 @@ paths:
       summary: "List issues"
       security: [{BearerAuth: []}]
       responses:
-        "200": {"description": "Activity page"}
+        "200":
+          description: "Activity page"
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/ActivityPage"}
         "400": {"description": "Invalid request"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "500": {"$ref": "#/components/responses/InternalError"}
   "/api/v1/projects/{id}/repositories/{repoId}/issues/{number}":
     parameters:
       - {"$ref": "#/components/parameters/id"}
@@ -992,8 +1067,15 @@ paths:
       summary: "issues detail"
       security: [{BearerAuth: []}]
       responses:
-        "200": {"description": "Activity result"}
+        "200":
+          description: "Activity result"
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/GitHubActivity"}
         "404": {"description": "Resource not found"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "500": {"$ref": "#/components/responses/InternalError"}
   "/api/v1/projects/{id}/repositories/{repoId}/issues/{number}/comments":
     parameters:
       - {"$ref": "#/components/parameters/id"}
@@ -1006,8 +1088,15 @@ paths:
       summary: "issues comments"
       security: [{BearerAuth: []}]
       responses:
-        "200": {"description": "Activity result"}
+        "200":
+          description: "Activity result"
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/ActivityPage"}
         "404": {"description": "Resource not found"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "500": {"$ref": "#/components/responses/InternalError"}
   "/api/v1/projects/{id}/pulls":
     parameters:
       - {"$ref": "#/components/parameters/id"}
@@ -1018,8 +1107,15 @@ paths:
       summary: "List pulls"
       security: [{BearerAuth: []}]
       responses:
-        "200": {"description": "Activity page"}
+        "200":
+          description: "Activity page"
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/ActivityPage"}
         "400": {"description": "Invalid request"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "500": {"$ref": "#/components/responses/InternalError"}
   "/api/v1/projects/{id}/repositories/{repoId}/pulls":
     parameters:
       - {"$ref": "#/components/parameters/id"}
@@ -1031,8 +1127,15 @@ paths:
       summary: "List pulls"
       security: [{BearerAuth: []}]
       responses:
-        "200": {"description": "Activity page"}
+        "200":
+          description: "Activity page"
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/ActivityPage"}
         "400": {"description": "Invalid request"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "500": {"$ref": "#/components/responses/InternalError"}
   "/api/v1/projects/{id}/repositories/{repoId}/pulls/{number}":
     parameters:
       - {"$ref": "#/components/parameters/id"}
@@ -1043,8 +1146,15 @@ paths:
       summary: "pulls detail"
       security: [{BearerAuth: []}]
       responses:
-        "200": {"description": "Activity result"}
+        "200":
+          description: "Activity result"
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/GitHubActivity"}
         "404": {"description": "Resource not found"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "500": {"$ref": "#/components/responses/InternalError"}
   "/api/v1/projects/{id}/repositories/{repoId}/pulls/{number}/comments":
     parameters:
       - {"$ref": "#/components/parameters/id"}
@@ -1057,8 +1167,15 @@ paths:
       summary: "pulls comments"
       security: [{BearerAuth: []}]
       responses:
-        "200": {"description": "Activity result"}
+        "200":
+          description: "Activity result"
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/ActivityPage"}
         "404": {"description": "Resource not found"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "500": {"$ref": "#/components/responses/InternalError"}
   "/api/v1/projects/{id}/repositories/{repoId}/pulls/{number}/commits":
     parameters:
       - {"$ref": "#/components/parameters/id"}
@@ -1071,8 +1188,15 @@ paths:
       summary: "pulls commits"
       security: [{BearerAuth: []}]
       responses:
-        "200": {"description": "Activity result"}
+        "200":
+          description: "Activity result"
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/ActivityPage"}
         "404": {"description": "Resource not found"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "500": {"$ref": "#/components/responses/InternalError"}
   "/api/v1/projects/{id}/repositories/{repoId}/sync-policy":
     parameters:
       - {"$ref": "#/components/parameters/id"}
@@ -1082,7 +1206,15 @@ paths:
       summary: "Read configured repository schedules"
       security: [{BearerAuth: []}]
       responses:
-        "200": {"description": "Policies with next time, job and outcome"}
+        "200":
+          description: "Policies with next time, job and outcome"
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/PolicyList"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "500": {"$ref": "#/components/responses/InternalError"}
   "/api/v1/projects/{id}/repositories/{repoId}/sync-policy/{kind}":
     parameters:
       - {"$ref": "#/components/parameters/id"}
@@ -1092,9 +1224,27 @@ paths:
       operationId: setSyncPolicy
       summary: "Set enabled and interval_seconds for files, commits or github_activity"
       security: [{BearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled, interval_seconds]
+              additionalProperties: false
+              properties:
+                enabled: {type: boolean}
+                interval_seconds: {type: integer, maximum: 31536000, description: "Minimum is configured by SCHEDULE_MIN_INTERVAL_SECONDS."}
       responses:
-        "200": {"description": "Updated policies"}
+        "200":
+          description: "Updated policies"
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/PolicyList"}
         "400": {"description": "Invalid policy"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "500": {"$ref": "#/components/responses/InternalError"}
 components:
   securitySchemes:
     BearerAuth:
@@ -1269,6 +1419,101 @@ components:
             error: "request deadline exceeded"
             code: "request_timeout"
   schemas:
+    PolicyList:
+      type: object
+      properties:
+        items: {"type": "array", "items": {"$ref": "#/components/schemas/SyncPolicy"}}
+    SyncPolicy:
+      type: object
+      properties:
+        kind: {"type": "string", "enum": ["files", "commits", "github_activity"]}
+        enabled: {"type": "boolean"}
+        interval_seconds: {"type": "integer"}
+        next_at: {"type": "string", "format": "date-time", "nullable": true}
+        last_job_id: {"type": "string", "format": "uuid", "nullable": true}
+        last_success_at: {"type": "string", "format": "date-time", "nullable": true}
+        last_error_code: {"type": "string", "nullable": true}
+    ActivityPage:
+      type: object
+      properties:
+        items: {"type": "array", "items": {"$ref": "#/components/schemas/GitHubActivity"}}
+        offset: {"type": "integer"}
+        limit: {"type": "integer"}
+    GitHubActivity:
+      type: object
+      properties:
+        repository_id: {"type": "string", "format": "uuid"}
+        kind: {"type": "string"}
+        number: {"type": "integer"}
+        id: {"type": "integer", "format": "int64"}
+        user: {"type": "object", "properties": {"login": {"type": "string"}}}
+        title: {"type": "string"}
+        body: {"type": "string"}
+        state: {"type": "string"}
+        html_url: {"type": "string"}
+        sha: {"type": "string"}
+        path: {"type": "string"}
+        commit_id: {"type": "string"}
+        line: {"type": "integer"}
+        created_at: {"type": "string", "format": "date-time"}
+        updated_at: {"type": "string", "format": "date-time"}
+        truncated: {"type": "boolean"}
+    CommitComparison:
+      type: object
+      properties:
+        items: {"type": "array", "items": {"$ref": "#/components/schemas/FileChange"}}
+        total: {"type": "integer"}
+        truncated: {"type": "boolean"}
+        base: {"type": "string"}
+        head: {"type": "string"}
+        patch: {"type": "string"}
+        patch_truncated: {"type": "boolean"}
+    FileChangePage:
+      type: object
+      properties:
+        items: {"type": "array", "items": {"$ref": "#/components/schemas/FileChange"}}
+        total: {"type": "integer"}
+        truncated: {"type": "boolean"}
+    FileChange:
+      type: object
+      properties:
+        path: {"type": "string"}
+        type: {"type": "string"}
+        old_path: {"type": "string"}
+        binary: {"type": "boolean"}
+        insertions: {"type": "integer"}
+        deletions: {"type": "integer"}
+    CommitHistoryPage:
+      type: object
+      properties:
+        ref: {"type": "string"}
+        tip: {"type": "string"}
+        synced_at: {"type": "string", "format": "date-time"}
+        total: {"type": "integer"}
+        has_more: {"type": "boolean"}
+        items: {"type": "array", "items": {"$ref": "#/components/schemas/CommitHistoryEntry"}}
+    CommitHistoryEntry:
+      type: object
+      properties:
+        hash: {"type": "string"}
+        tree_hash: {"type": "string"}
+        subject: {"type": "string"}
+        message: {"type": "string"}
+        author_name: {"type": "string"}
+        author_email: {"type": "string"}
+        committer_name: {"type": "string"}
+        committer_email: {"type": "string"}
+        html_url: {"type": "string"}
+        parents: {"type": "array", "items": {"type": "string"}}
+        authored_at: {"type": "string", "format": "date-time"}
+        committed_at: {"type": "string", "format": "date-time"}
+        truncated: {"type": "boolean"}
+    SyncReceipt:
+      type: object
+      properties:
+        job_id: {"type": "string", "format": "uuid"}
+        status: {"$ref": "#/components/schemas/JobStatus"}
+        poll_url: {"type": "string"}
     Error:
       type: "object"
       required: ["error", "code"]
@@ -1338,7 +1583,7 @@ components:
       type: "object"
       required: ["type"]
       properties:
-        type: {"type": "string"}
+        type: {"type": "string", "enum": ["repository.scan", "repository.sync", "mock.echo", "mock.sleep", "mock.fail", "mock.flaky"], "description": "Mock types require explicit opt-in in development or test."}
         payload: {"type": "object", "additionalProperties": true}
         idempotency_key: {"type": "string"}
         max_attempts: {"type": "integer"}

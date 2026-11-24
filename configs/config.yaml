@@ -49,7 +49,16 @@ github:
   timeout: 10s
   user_agent: ProjectLens
 
+observability:
+  metrics_addr: ""
+  trace: false
+
+schedule:
+  min_interval_seconds: 60
+  batch: 4
+
 worker:
+  enable_mock_jobs: false
   mode: embedded
   id: ""
   concurrency: 4

@@ -247,13 +247,13 @@ Set `TEST_SCAN_LOCAL_REPO` and `TEST_SCAN_REMOTE_REPO` to exercise the live scan
 
 ### Publish a repository snapshot
 
-Queue a `repository.sync` job for an associated repository to publish its scanned source files and commit metadata to PostgreSQL.
+Call the repository sync endpoint to publish its scanned source files and commit metadata to PostgreSQL.
 
 ```sh
-curl -X POST http://localhost:8080/api/v1/jobs \
+curl -X POST "http://localhost:8080/api/v1/projects/$PROJECT_ID/repositories/$REPO_ID/sync" \
   -H "Authorization: Bearer $PROJECTLENS_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"type":"repository.sync","payload":{"project_id":"<project UUID>","repository_id":"<repository UUID>","ref":"main"}}'
+  -d '{"ref":"main"}'
 ```
 
 Omit `ref` to sync `HEAD`. The job uses the same Git sources and filters as `repository.scan`. The job result includes `status`, `snapshot_id`, `version`, commit and tree hashes, file change counts, `blobs_read`, and `pruned_snapshots`. A matching commit, tree, and filter configuration returns `unchanged` with zero blob reads and the existing snapshot ID. A changed scan returns `published` with a new version. Git reads new blobs and PostgreSQL copies content for files whose blobs already appear in the parent snapshot. The previous version serves reads until the new version commits.
@@ -283,3 +283,23 @@ TEST_SCAN_LOCAL_REPO=/Users/hiya/HyAgent \
 TEST_SCAN_REMOTE_REPO=https://github.com/GilbertXD/HyMail.git \
   go test -race -v -run '^TestLiveSnapshotSync$' ./internal/integration
 ```
+
+
+### Commit history, GitHub activity and schedules
+
+Set `R=/api/v1/projects/$PROJECT_ID/repositories/$REPO_ID` for an associated repository. Send the usual Bearer header. A newly queued sync returns 202 with `job_id`, `status` and `poll_url`. Poll that URL or use the existing job cancellation endpoint. An active sync of the same type and ref returns 200. A competing ref returns 409.
+
+| Method | Path | Result |
+| --- | --- | --- |
+| POST | `$R/sync`, `$R/commits/sync` | File snapshot or commit history. Optional body `{"ref":"main"}`, default `HEAD`. |
+| POST | `$R/refresh-metadata` | Synchronously refresh repository metadata. Clients using the old metadata-only `/sync` behavior should migrate here. |
+| GET | `$R/commits?ref=main` | Published tip, import window and topologically ordered commits. |
+| GET | `$R/commits/:sha`, `$R/commits/:sha/files` | Imported metadata or first-parent changes. A root commit is compared with an empty tree. |
+| GET | `$R/compare?base=<sha>&head=<sha>` | File changes, binary flags, rename paths, line counts and a bounded unified patch. Both full SHAs must already belong to this repository's imported history. |
+| POST | `$R/github-activity/sync` | Synchronize public GitHub issues, PRs, comments, review comments and associated commits. |
+| GET | `$R/issues`, `$R/pulls` | Repository activity lists. Project-wide lists are available at `/api/v1/projects/:id/issues` and `/api/v1/projects/:id/pulls`. |
+| GET | `$R/issues/:number`, `$R/pulls/:number` | Issue or PR details. Append `/comments` for discussion and review comments, or `/commits` for a PR's commit links. |
+| GET | `$R/sync-policy` | Configured policies, next due time, latest job, last success time and recent failure code. A missing policy is disabled. |
+| PUT | `$R/sync-policy/:kind` | Set a policy, e.g. `{"enabled":true,"interval_seconds":3600}`. Kinds are `files`, `commits` and `github_activity`. |
+
+Lists accept `limit` (default 20, maximum 100) and nonnegative `offset`. File pagination in Compare applies to `items`. The patch describes the full comparison. Job results and stored data survive API and worker restarts. Commit history and activity use the scoped sync endpoints. See the [operations guide](docs/OPERATIONS.md) and [measured performance report](docs/PERFORMANCE.md).
