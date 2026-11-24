@@ -305,7 +305,12 @@ func (cfg AuthConfig) Validate() error {
 	return nil
 }
 
+type ScheduleConfig struct {
+	MinIntervalSeconds int `yaml:"min_interval_seconds"`
+	Batch              int `yaml:"batch"`
+}
 type Config struct {
+	Schedule   ScheduleConfig   `yaml:"schedule"`
 	Auth       AuthConfig       `yaml:"auth"`
 	Redis      RedisConfig      `yaml:"redis"`
 	Search     SearchConfig     `yaml:"search"`
@@ -451,7 +456,8 @@ type CORSConfig struct {
 
 func defaults() Config {
 	return Config{
-		Auth: AuthConfig{BearerTokens: []string{}},
+		Schedule: ScheduleConfig{MinIntervalSeconds: 60, Batch: 4},
+		Auth:     AuthConfig{BearerTokens: []string{}},
 		Redis: RedisConfig{
 			Enabled: true, Addr: "localhost:6379", KeyPrefix: "projectlens",
 			DialTimeout: 300 * time.Millisecond, ReadTimeout: 300 * time.Millisecond, WriteTimeout: 300 * time.Millisecond,
@@ -612,6 +618,7 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		{"SCANNER_MAX_PATH_LENGTH", &cfg.Scanner.MaxPathLength},
 		{"SCANNER_MAX_PATH_DEPTH", &cfg.Scanner.MaxPathDepth},
 		{"WORKER_CONCURRENCY", &cfg.Worker.Concurrency},
+		{"SCHEDULE_MIN_INTERVAL_SECONDS", &cfg.Schedule.MinIntervalSeconds}, {"SCHEDULE_BATCH", &cfg.Schedule.Batch},
 		{"WORKER_DEFAULT_MAX_ATTEMPTS", &cfg.Worker.DefaultMaxAttempts},
 	} {
 		if value, ok := lookupEnv(field.name); ok {
@@ -759,6 +766,9 @@ func (cfg Config) Validate() error {
 	}
 	if err := cfg.Scanner.Validate(); err != nil {
 		return err
+	}
+	if cfg.Schedule.MinIntervalSeconds < 1 || cfg.Schedule.MinIntervalSeconds > 31536000 || cfg.Schedule.Batch < 1 || cfg.Schedule.Batch > 100 {
+		return errors.New("schedule interval or batch outside allowed range")
 	}
 	w := cfg.Worker
 	switch w.Mode {

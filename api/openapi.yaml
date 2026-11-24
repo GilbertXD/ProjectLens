@@ -1073,6 +1073,28 @@ paths:
       responses:
         "200": {"description": "Activity result"}
         "404": {"description": "Resource not found"}
+  "/api/v1/projects/{id}/repositories/{repoId}/sync-policy":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+    get:
+      operationId: listSyncPolicies
+      summary: "Read configured repository schedules"
+      security: [{BearerAuth: []}]
+      responses:
+        "200": {"description": "Policies with next time, job and outcome"}
+  "/api/v1/projects/{id}/repositories/{repoId}/sync-policy/{kind}":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+      - {"in": "path", "name": "kind", "required": true, "schema": {"type": "string"}}
+    put:
+      operationId: setSyncPolicy
+      summary: "Set enabled and interval_seconds for files, commits or github_activity"
+      security: [{BearerAuth: []}]
+      responses:
+        "200": {"description": "Updated policies"}
+        "400": {"description": "Invalid policy"}
 components:
   securitySchemes:
     BearerAuth:

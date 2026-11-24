@@ -108,6 +108,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "register repository sync handler: %v\n", err)
 		return 1
 	}
-	worker.NewRunner(repository.NewPostgresJobStore(pool), registry, cfg.Worker, log).Run(ctx)
+	jobStore := repository.NewPostgresJobStore(pool)
+	scheduler := &service.Scheduler{Repositories: repositoryStore, Tx: db.NewPgxTxManager(pool), Jobs: service.NewJobService(jobStore, registry, cfg.Worker), Config: cfg.Schedule}
+	scheduler.Run(ctx, log, worker.NewRunner(jobStore, registry, cfg.Worker, log).Run)
 	return 0
 }

@@ -13,6 +13,7 @@ import (
 )
 
 type Dependencies struct {
+	Schedule     *handler.ScheduleHandler
 	Activity     *handler.ActivityHandler
 	History      *handler.HistoryHandler
 	Documents    *handler.DocumentHandler
@@ -61,6 +62,9 @@ func New(cfg config.Config, log *slog.Logger, optional ...Dependencies) *gin.Eng
 	}
 	if deps.Repositories != nil {
 		deps.Repositories.Register(api)
+	}
+	if deps.Schedule != nil {
+		deps.Schedule.Register(api)
 	}
 	if deps.Activity != nil {
 		deps.Activity.Register(api)

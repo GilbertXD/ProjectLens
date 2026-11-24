@@ -39,6 +39,13 @@ func (s *ActivityService) Sync(ctx context.Context, target domain.SyncTarget) (i
 	if repo.SourceType != domain.RepositorySourceGitHub {
 		return 0, fmt.Errorf("%w: expected GitHub repository", domain.ErrInvalidInput)
 	}
+	until, err := s.Repositories.ActivityBackoff(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+	if until != nil {
+		return 0, &github.RetryError{Delay: time.Until(*until)}
+	}
 	owner, name := *repo.GitHubOwner, *repo.GitHubRepo
 	meta, err := s.Client.PublicActivityMetadata(ctx, owner, name)
 	if err != nil {

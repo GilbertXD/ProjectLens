@@ -151,7 +151,7 @@ func (s *PostgresJobStore) CompleteFailed(ctx context.Context, id uuid.UUID, wor
         UPDATE jobs SET
             status = CASE WHEN cancel_requested_at IS NOT NULL THEN 'cancelled'
                 WHEN $6 AND attempt < max_attempts THEN 'pending' ELSE 'failed' END,
-            run_at = CASE WHEN cancel_requested_at IS NULL AND $6 AND attempt < max_attempts THEN NOW() + $7::interval ELSE run_at END,
+            run_at = CASE WHEN cancel_requested_at IS NULL AND $6 AND (attempt < max_attempts OR $4 = 'github_rate_limit') THEN NOW() + $7::interval ELSE run_at END,
             finished_at = CASE WHEN cancel_requested_at IS NULL AND $6 AND attempt < max_attempts THEN NULL ELSE NOW() END,
             last_error_code = CASE WHEN cancel_requested_at IS NOT NULL THEN 'cancelled' ELSE $4 END,
             last_error = CASE WHEN cancel_requested_at IS NOT NULL THEN 'cancelled by request' ELSE $5 END,

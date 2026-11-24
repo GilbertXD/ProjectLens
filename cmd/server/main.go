@@ -120,6 +120,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	jobStore := repository.NewPostgresJobStore(pool)
 	jobs := service.NewJobService(jobStore, registry, cfg.Worker)
+	scheduler := &service.Scheduler{Repositories: repositoryStore, Tx: db.NewPgxTxManager(pool), Jobs: jobs, Config: cfg.Schedule}
 	var searchCache service.SearchCache
 	var cachePinger handler.CachePinger
 	if cfg.Redis.Enabled {
@@ -138,16 +139,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 		Projects:     handler.NewProjectHandler(projects, log),
 		Documents:    handler.NewDocumentHandler(documents, log, cfg.Document.MaxContentBytes),
 		Repositories: handler.NewRepositoryHandler(repositories, log),
-		Activity:     &handler.ActivityHandler{Store: repositoryStore, Log: log},
-		History:      &handler.HistoryHandler{Service: history, Log: log},
-		Snapshots:    handler.NewSnapshotHandler(syncer, log),
-		Search:       handler.NewSearchHandler(search, log),
-		Pinger:       pool,
-		CachePinger:  cachePinger,
-		Jobs:         handler.NewJobHandler(jobs, log),
+		Schedule:     &handler.ScheduleHandler{Service: scheduler, Log: log}, Activity: &handler.ActivityHandler{Store: repositoryStore, Log: log},
+		History:     &handler.HistoryHandler{Service: history, Log: log},
+		Snapshots:   handler.NewSnapshotHandler(syncer, log),
+		Search:      handler.NewSearchHandler(search, log),
+		Pinger:      pool,
+		CachePinger: cachePinger,
+		Jobs:        handler.NewJobHandler(jobs, log),
 	})
 	runner := worker.NewRunner(jobStore, registry, cfg.Worker, log)
-	if err := runHTTPAndWorker(ctx, cfg.Worker.Mode, server.New(cfg, log, routes).Run, runner.Run); err != nil {
+	if err := runHTTPAndWorker(ctx, cfg.Worker.Mode, server.New(cfg, log, routes).Run, func(ctx context.Context) { scheduler.Run(ctx, log, runner.Run) }); err != nil {
 		fmt.Fprintf(stderr, "run server: %v\n", err)
 		return 1
 	}
