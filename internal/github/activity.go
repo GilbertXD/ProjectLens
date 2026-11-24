@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -145,9 +146,10 @@ func (a *Activity) normalize() error {
 	a.User.Login = boundedText(a.User.Login, 128)
 	return nil
 }
-func (f *ActivityFeed) List(ctx context.Context, path string, q url.Values, visit func(Activity) error) error {
-	if q == nil {
-		q = url.Values{}
+func (f *ActivityFeed) List(ctx context.Context, path string, query url.Values, visit func(Activity) error) error {
+	q := make(url.Values, len(query)+2)
+	for key, values := range query {
+		q[key] = slices.Clone(values)
 	}
 	q.Set("per_page", "100")
 	for page := 1; page <= 50; page++ {

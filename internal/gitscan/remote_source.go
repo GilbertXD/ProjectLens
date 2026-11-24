@@ -129,15 +129,23 @@ func (s *RemoteSource) Prepare(ctx context.Context, spec SourceSpec) (*PreparedR
 			return nil, remoteError(err)
 		}
 	}
-	if err := fetchCommit(ctx, git, fetchDir, cloneURL, ref, max(1, spec.depth)); err != nil {
-		return nil, err
-	}
-	oid, err := git.resolve(ctx, fetchDir, "FETCH_HEAD")
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+	var oid string
+	if spec.compareBase != "" {
+		oid, err = prepareCompare(ctx, git, fetchDir, cloneURL, ref, spec.compareBase)
+		if err != nil {
+			return nil, err
 		}
-		return nil, fmt.Errorf("%w: fetched ref does not resolve to a commit", domain.ErrInvalidInput)
+	} else {
+		if err := fetchCommit(ctx, git, fetchDir, cloneURL, ref, max(1, spec.depth)); err != nil {
+			return nil, err
+		}
+		oid, err = git.resolve(ctx, fetchDir, "FETCH_HEAD")
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, fmt.Errorf("%w: fetched ref does not resolve to a commit", domain.ErrInvalidInput)
+		}
 	}
 	if fetchDir != dir {
 		if err := os.Rename(fetchDir, dir); err != nil {
@@ -149,6 +157,33 @@ func (s *RemoteSource) Prepare(ctx context.Context, spec SourceSpec) (*PreparedR
 		SourceType: domain.RepositorySourceGitHub, Source: spec.Source, CanonicalSource: canonical,
 		GitDir: dir, PinnedCommit: oid, ResolvedRef: ref, Release: release,
 	}, nil
+}
+
+func prepareCompare(ctx context.Context, git gitRunner, dir, cloneURL, head, base string) (string, error) {
+	fetchedHead := false
+	for _, sha := range []string{head, base} {
+		if _, err := git.resolve(ctx, dir, sha); err == nil {
+			continue
+		}
+		if err := fetchCommit(ctx, git, dir, cloneURL, sha, 1); err != nil {
+			if fetchedHead {
+				break
+			}
+			if err := fetchCommit(ctx, git, dir, cloneURL, "HEAD", HistoryLimit+2); err != nil {
+				return "", err
+			}
+			fetchedHead = true
+		}
+	}
+	oid, headErr := git.resolve(ctx, dir, head)
+	_, baseErr := git.resolve(ctx, dir, base)
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+	if headErr != nil || baseErr != nil {
+		return "", fmt.Errorf("%w: compare revisions must resolve to commits", domain.ErrInvalidInput)
+	}
+	return oid, nil
 }
 
 func fetchCommit(ctx context.Context, git gitRunner, dir, cloneURL, ref string, depth int) error {

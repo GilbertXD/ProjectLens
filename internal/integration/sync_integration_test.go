@@ -890,10 +890,26 @@ func TestScopedSyncRequests(t *testing.T) {
 	request(t, srv, "POST", path, "{}", 200, &got)
 	request(t, srv, "POST", path, `{"ref":"other"}`, 409, nil)
 	request(t, srv, "POST", path, `{"source":"/tmp"}`, 400, nil)
+	request(t, srv, "POST", path, "null", 400, nil)
+	request(t, srv, "POST", path, "{}{}", 400, nil)
+	request(t, srv, "POST", path, "{", 400, nil)
 	request(t, srv, "POST", path, `{"ref":"bad//ref"}`, 400, nil)
 	request(t, srv, "POST", strings.Replace(path, f.projectID.String(), uuid.NewString(), 1), "", 404, nil)
 	startJobWorker(t, f.cfg.Worker, store, reg)
 	waitJob(t, store, got.ID, jobStatus(domain.JobSucceeded))
 	request(t, srv, "GET", got.URL, "", 200, nil)
-	request(t, srv, "POST", path, "", 202, nil)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+path, io.NopCloser(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.ContentLength = -1
+	req.TransferEncoding = []string{"chunked"}
+	res, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusAccepted {
+		t.Fatalf("chunked empty sync request returned %d", res.StatusCode)
+	}
 }

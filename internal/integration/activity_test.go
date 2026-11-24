@@ -1,11 +1,13 @@
 package integration
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -27,7 +29,18 @@ func TestActivityReconciliation(t *testing.T) {
 	f.attach(t, domain.Repository{SourceType: domain.RepositorySourceGitHub, Source: "https://github.com/owner/project", GitHubOwner: &owner, GitHubRepo: &name, GitHubRepoID: &id})
 	const root = "/repos/owner/project"
 	var failure, phase, conditional atomic.Int32
+	var inTx atomic.Bool
+	tx := syncTxObserver(func(ctx context.Context, fn func(context.Context) error) error {
+		return f.tx.WithinTx(ctx, func(ctx context.Context) error {
+			inTx.Store(true)
+			defer inTx.Store(false)
+			return fn(ctx)
+		})
+	})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if inTx.Load() {
+			t.Errorf("GitHub request %s ran inside the activity transaction", r.URL.Path)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		n := phase.Load()
 		item := func(id, num int, extra map[string]any) map[string]any {
@@ -79,7 +92,7 @@ func TestActivityReconciliation(t *testing.T) {
 		json.NewEncoder(w).Encode(body)
 	}))
 	defer srv.Close()
-	s := service.ActivityService{Repositories: f.repos, Locks: f.store, Tx: f.tx, Client: github.NewClient(config.GitHubConfig{APIBaseURL: srv.URL}, srv.Client())}
+	s := service.ActivityService{Repositories: f.repos, Locks: f.store, Tx: tx, Client: github.NewClient(config.GitHubConfig{APIBaseURL: srv.URL}, srv.Client())}
 	target := domain.SyncTarget{ProjectID: f.projectID, RepositoryID: f.repoID}
 	syncOK := func() {
 		if _, err := s.Sync(t.Context(), target); err != nil {
@@ -144,6 +157,88 @@ func TestActivityReconciliation(t *testing.T) {
 	}
 	syncOK()
 	count(3)
+}
+
+func TestEmptyGitHubActivityCursor(t *testing.T) {
+	f := newSyncFixture(t)
+	owner, name, id := "owner", "empty", int64(42)
+	f.attach(t, domain.Repository{SourceType: domain.RepositorySourceGitHub, Source: "https://github.com/owner/empty", GitHubOwner: &owner, GitHubRepo: &name, GitHubRepoID: &id})
+	const root = "/repos/owner/empty"
+	var lists atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case root:
+			fmt.Fprint(w, `{"id":42,"full_name":"owner/empty"}`)
+		case root + "/issues", root + "/issues/comments", root + "/pulls/comments":
+			lists.Add(1)
+			if r.URL.Query().Has("since") {
+				t.Errorf("empty activity query sent since=%q", r.URL.Query().Get("since"))
+			}
+			if q := r.URL.Query(); q.Get("page") != "1" || q.Get("per_page") != "100" {
+				t.Errorf("unexpected paging query %s", r.URL.RawQuery)
+			}
+			fmt.Fprint(w, "[]")
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	client := github.NewClient(config.GitHubConfig{APIBaseURL: srv.URL}, srv.Client())
+	s := service.ActivityService{Repositories: f.repos, Locks: f.store, Tx: f.tx, Client: client}
+	target := domain.SyncTarget{ProjectID: f.projectID, RepositoryID: f.repoID}
+	for range 2 {
+		if n, err := s.Sync(t.Context(), target); err != nil || n != 0 {
+			t.Fatal(n, err)
+		}
+		cursor, _, err := f.repos.ActivityCursor(t.Context(), f.repoID)
+		if err != nil || !cursor.Equal(time.Unix(0, 0)) {
+			t.Fatal(cursor, err)
+		}
+	}
+	if lists.Load() != 6 {
+		t.Fatalf("expected three lists per sync, got %d", lists.Load())
+	}
+	feed, err := client.Feed(owner, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := url.Values{"page": {"7"}, "state": {"all"}}
+	before := query.Encode()
+	if err := feed.List(t.Context(), "issues", query, func(github.Activity) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if query.Encode() != before {
+		t.Fatalf("List mutated the caller's query: %v", query)
+	}
+}
+
+func TestActivityRequiresGitHubIdentifiers(t *testing.T) {
+	f := newSyncFixture(t)
+	owner, name, id := "owner", "project", int64(42)
+	f.attach(t, domain.Repository{SourceType: domain.RepositorySourceGitHub, Source: "https://github.com/owner/project", GitHubOwner: &owner, GitHubRepo: &name, GitHubRepoID: &id})
+	ctx := t.Context()
+	if _, err := f.pool.Exec(ctx, "ALTER TABLE repositories DROP CONSTRAINT repositories_source_consistent"); err != nil {
+		t.Fatal(err)
+	}
+	s := service.ActivityService{Repositories: f.repos, Locks: f.store, Tx: f.tx}
+	target := domain.SyncTarget{ProjectID: f.projectID, RepositoryID: f.repoID}
+	for _, tc := range []struct {
+		label       string
+		owner, name any
+	}{
+		{"nil owner", nil, name}, {"nil repository", owner, nil},
+		{"empty owner", "", name}, {"empty repository", owner, ""},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			if _, err := f.pool.Exec(ctx, "UPDATE repositories SET github_owner=$1, github_repo=$2 WHERE id=$3", tc.owner, tc.name, f.repoID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Sync(ctx, target); !errors.Is(err, domain.ErrInvalidInput) {
+				t.Fatalf("expected invalid GitHub identifiers, got %v", err)
+			}
+		})
+	}
 }
 
 func TestLiveGitHubActivity(t *testing.T) {

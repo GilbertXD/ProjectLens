@@ -13,7 +13,8 @@ import (
 
 func Logger(log *slog.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		ctx, span := telemetry.Span(c.Request.Context(), "http.request")
+		parent := telemetry.Restore(c.Request.Context(), c.GetHeader("traceparent"))
+		ctx, span := telemetry.Span(parent, "http.request")
 		defer span.End()
 		c.Request = c.Request.WithContext(ctx)
 		start := time.Now()

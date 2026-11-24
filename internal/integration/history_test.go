@@ -1,15 +1,27 @@
 package integration
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"projectlens/internal/domain"
 	"projectlens/internal/service"
 )
+
+type syncTxObserver func(context.Context, func(context.Context) error) error
+
+func (observe syncTxObserver) WithinTx(ctx context.Context, fn func(context.Context) error) error {
+	return observe(ctx, fn)
+}
 
 func TestHistoryReachabilityAndChanges(t *testing.T) {
 	f := localSyncFixture(t)
@@ -24,7 +36,39 @@ func TestHistoryReachabilityAndChanges(t *testing.T) {
 	f.write(t, "binary", "hello\x00world")
 	rename := f.commit(t, "rename")
 	syncGit(t, f.dir, "merge", "--no-ff", "-m", "merge", "side")
-	h := service.HistoryService{Repositories: f.repos, Locks: f.store, Scanner: f.scanner, Tx: f.tx}
+	shim := t.TempDir()
+	marker := filepath.Join(shim, "transaction-active")
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `#!/bin/sh
+if [ -e "$PROJECTLENS_TEST_HISTORY_TX" ]; then
+	echo "Git invoked inside the history transaction" >&2
+	exit 1
+fi
+exec "$PROJECTLENS_TEST_GIT" "$@"
+`
+	if err := os.WriteFile(filepath.Join(shim, "git"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PROJECTLENS_TEST_GIT", git)
+	t.Setenv("PROJECTLENS_TEST_HISTORY_TX", marker)
+	t.Setenv("PATH", shim+string(os.PathListSeparator)+os.Getenv("PATH"))
+	tx := syncTxObserver(func(ctx context.Context, fn func(context.Context) error) error {
+		return f.tx.WithinTx(ctx, func(ctx context.Context) error {
+			if err := os.WriteFile(marker, nil, 0600); err != nil {
+				return err
+			}
+			defer func() {
+				if err := os.Remove(marker); err != nil {
+					t.Error(err)
+				}
+			}()
+			return fn(ctx)
+		})
+	})
+	h := service.HistoryService{Repositories: f.repos, Locks: f.store, Scanner: f.scanner, Tx: tx}
 	target := domain.SyncTarget{ProjectID: f.projectID, RepositoryID: f.repoID, Ref: "main"}
 	syncCount := func(n int) {
 		t.Helper()
@@ -37,8 +81,9 @@ func TestHistoryReachabilityAndChanges(t *testing.T) {
 	if _, err := f.pool.Exec(ctx, "ALTER TABLE repository_history_refs ADD CONSTRAINT injected_failure CHECK (false)"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.Sync(ctx, target); err == nil {
-		t.Fatal("injected publication failure was ignored")
+	var publicationErr *pgconn.PgError
+	if _, err := h.Sync(ctx, target); !errors.As(err, &publicationErr) || publicationErr.ConstraintName != "injected_failure" {
+		t.Fatalf("expected injected publication failure after scanning Git, got %v", err)
 	}
 	var leaked int
 	if err := f.pool.QueryRow(ctx, "SELECT count(*) FROM repository_commits").Scan(&leaked); err != nil || leaked != 0 {

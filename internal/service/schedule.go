@@ -57,7 +57,10 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 			}
 			payload, _ := json.Marshal(domain.SyncTarget{ProjectID: p.Project, RepositoryID: p.Repo, Ref: "HEAD"})
 			job, _, err := s.Jobs.Enqueue(ctx, domain.CreateJobInput{Type: domain.SyncJobType(p.Kind), Payload: payload})
-			if errors.Is(err, domain.ErrConflict) {
+			if errors.Is(err, domain.ErrNotFound) {
+				continue
+			}
+			if errors.Is(err, domain.ErrConflict) || errors.Is(err, domain.ErrInvalidInput) {
 				if err := s.Repositories.NextPolicy(ctx, p, nil, nil, s.Config.MinIntervalSeconds); err != nil {
 					return err
 				}

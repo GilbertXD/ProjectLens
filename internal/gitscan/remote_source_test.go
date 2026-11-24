@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -99,6 +100,49 @@ func TestRemoteManifestParity(t *testing.T) {
 	remote.Ref = "-x"
 	if _, err := scanner.Scan(t.Context(), remote, options); !errors.Is(err, domain.ErrInvalidInput) {
 		t.Fatalf("invalid remote ref: %v", err)
+	}
+}
+
+func TestRemoteCompareColdCache(t *testing.T) {
+	dir := newFixture(t)
+	writeFixture(t, dir, "a.txt", "original\n", 0644)
+	fixtureGit(t, dir, "add", "a.txt")
+	base := saveFixture(t, dir)
+	writeFixture(t, dir, "a.txt", "updated\n", 0644)
+	fixtureGit(t, dir, "add", "a.txt")
+	head := saveFixture(t, dir, base)
+	// The mirror advertises only this newer tip.
+	writeFixture(t, dir, "a.txt", "newer\n", 0644)
+	fixtureGit(t, dir, "add", "a.txt")
+	saveFixture(t, dir, head)
+
+	web := t.TempDir()
+	bare := filepath.Join(web, "owner", "project.git")
+	if err := os.MkdirAll(filepath.Dir(bare), 0700); err != nil {
+		t.Fatal(err)
+	}
+	fixtureGit(t, dir, "clone", "--bare", dir, bare)
+	fixtureGit(t, bare, "update-server-info")
+	files := http.FileServer(http.Dir(web))
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		files.ServeHTTP(w, r)
+	}))
+	defer server.Close()
+
+	cfg := config.DefaultScannerConfig()
+	cfg.CacheDir = t.TempDir()
+	scanner := NewScanner(cfg, config.RepositoryConfig{}, config.GitHubConfig{GitBaseURL: server.URL})
+	spec := SourceSpec{SourceType: domain.RepositorySourceGitHub, Source: "https://github.com/owner/project"}
+	changes, err := scanner.Compare(t.Context(), spec, base, head)
+	if err != nil || len(changes.Files) != 1 || changes.Files[0].Path != "a.txt" || !strings.Contains(changes.Patch, "+updated") {
+		t.Fatalf("cold-cache compare = %+v, %v", changes, err)
+	}
+	fetched := requests.Load()
+	cached, err := scanner.Compare(t.Context(), spec, base, head)
+	if err != nil || !reflect.DeepEqual(changes, cached) || fetched == 0 || requests.Load() != fetched {
+		t.Fatalf("warm-cache compare = %+v, %v, requests before=%d after=%d", cached, err, fetched, requests.Load())
 	}
 }
 

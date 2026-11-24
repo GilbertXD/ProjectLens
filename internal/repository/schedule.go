@@ -28,7 +28,7 @@ func (r *PostgresRepositoryStore) Policies(ctx context.Context, id uuid.UUID) ([
 	if err != nil {
 		return nil, err
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByPos[domain.Policy])
+	return pgx.AppendRows([]domain.Policy{}, rows, pgx.RowToStructByPos[domain.Policy])
 }
 
 type DuePolicy struct {
@@ -46,7 +46,7 @@ func (r *PostgresRepositoryStore) DuePolicies(ctx context.Context, batch int) ([
 	if err != nil {
 		return nil, err
 	}
-	rows, err := conn.Query(ctx, `SELECT r.project_id,p.repository_id,p.kind FROM sync_policies p JOIN repositories r ON r.id=p.repository_id WHERE enabled AND next_at<=now() ORDER BY next_at,p.repository_id,p.kind LIMIT $1 FOR UPDATE OF p SKIP LOCKED`, batch)
+	rows, err := conn.Query(ctx, `SELECT r.project_id,p.repository_id,p.kind FROM repositories r JOIN sync_policies p ON r.id=p.repository_id WHERE enabled AND next_at<=now() ORDER BY next_at,p.repository_id,p.kind LIMIT $1 FOR UPDATE OF r, p SKIP LOCKED`, batch)
 	if err != nil {
 		return nil, err
 	}

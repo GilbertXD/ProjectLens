@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	sdk "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 type localExporter struct{ log *slog.Logger }
@@ -31,6 +32,7 @@ func StartTracing(enabled bool, log *slog.Logger) func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		_ = p.Shutdown(ctx)
+		otel.SetTracerProvider(noop.NewTracerProvider())
 	}
 }
 func Span(ctx context.Context, name string) (context.Context, trace.Span) {

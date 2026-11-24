@@ -25,12 +25,29 @@ func (r *PostgresRepositoryStore) SaveActivity(ctx context.Context, id, batch uu
 	_, err := db.ConnFromContext(ctx, r.pool).Exec(ctx, `INSERT INTO github_activity VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(repository_id,kind,number,native_id) DO UPDATE SET data=excluded.data,seen=excluded.seen,etag=excluded.etag`, id, kind, key, n, a, batch, etag)
 	return err
 }
-func (r *PostgresRepositoryStore) CachedPull(ctx context.Context, id uuid.UUID, n int) (a github.Activity, etag string, err error) {
-	err = db.ConnFromContext(ctx, r.pool).QueryRow(ctx, "SELECT data,etag FROM github_activity WHERE repository_id=$1 AND number=$2 AND kind='pull'", id, n).Scan(&a, &etag)
-	if errors.Is(err, pgx.ErrNoRows) {
-		err = nil
+
+type CachedPull struct {
+	Activity github.Activity
+	ETag     string
+}
+
+func (r *PostgresRepositoryStore) CachedPulls(ctx context.Context, id uuid.UUID) (map[int]CachedPull, error) {
+	rows, err := r.pool.Query(ctx, `SELECT DISTINCT ON (number) number,data,etag FROM github_activity
+		WHERE repository_id=$1 AND kind='pull' ORDER BY number,native_id DESC`, id)
+	if err != nil {
+		return nil, err
 	}
-	return
+	defer rows.Close()
+	pulls := make(map[int]CachedPull)
+	for rows.Next() {
+		var n int
+		var pull CachedPull
+		if err := rows.Scan(&n, &pull.Activity, &pull.ETag); err != nil {
+			return nil, err
+		}
+		pulls[n] = pull
+	}
+	return pulls, rows.Err()
 }
 func (r *PostgresRepositoryStore) ClearOldLinks(ctx context.Context, id, batch uuid.UUID, n int) error {
 	_, err := db.ConnFromContext(ctx, r.pool).Exec(ctx, "DELETE FROM github_activity WHERE repository_id=$1 AND number=$2 AND kind='commit' AND seen<>$3", id, n, batch)

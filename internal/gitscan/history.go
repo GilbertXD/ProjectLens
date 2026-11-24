@@ -170,16 +170,17 @@ func (s *Scanner) Compare(ctx context.Context, spec SourceSpec, base, head strin
 	ctx, cancel := context.WithTimeout(ctx, s.cfg.GitTimeout)
 	defer cancel()
 	spec.Ref = head
+	spec.compareBase = base
 	repo, err := s.prepare(ctx, spec)
 	if err != nil {
 		return Changes{}, err
 	}
 	defer repo.Release()
-	changes, err := readChanges(ctx, repo.GitDir, base, head)
+	changes, err := readChanges(ctx, repo.GitDir, base, repo.PinnedCommit)
 	if err != nil {
 		return changes, err
 	}
-	raw, err := (gitRunner{}).run(ctx, 64<<10, false, "--git-dir="+repo.GitDir, "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--submodule=short", "-O/dev/null", "-M", "-l256", base, head, "--")
+	raw, err := (gitRunner{}).run(ctx, 64<<10, false, "--git-dir="+repo.GitDir, "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--submodule=short", "-O/dev/null", "-M", "-l256", base, repo.PinnedCommit, "--")
 	changes.PatchTruncated = errors.Is(err, errOutputLimit)
 	if err != nil && !changes.PatchTruncated {
 		return changes, err

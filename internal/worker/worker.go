@@ -185,7 +185,9 @@ func (r *Runner) execute(active context.Context, job domain.Job, token uuid.UUID
 		outcomeLabel = "interrupted"
 	}
 	telemetry.Jobs.WithLabelValues(telemetry.JobKind(job.Type), outcomeLabel).Observe(time.Since(start).Seconds())
-	r.log.InfoContext(jobCtx, "job attempt finished", "job_id", job.ID, "trace_id", telemetry.TraceID(jobCtx), "outcome", outcomeLabel, "attempt", job.Attempt)
+	traceID := telemetry.TraceID(jobCtx)
+	r.log.InfoContext(jobCtx, "job attempt finished", "job_id", job.ID, "job_type", job.Type, "worker_id", r.id,
+		"trace_id", traceID, "outcome", outcomeLabel, "attempt", job.Attempt)
 	jobErr := jobCtx.Err()
 	stopHeartbeat()
 	heartbeat := <-outcome
@@ -218,9 +220,9 @@ func (r *Runner) execute(active context.Context, job domain.Job, token uuid.UUID
 		}
 	}
 	if err != nil {
-		r.log.Error("complete job", "job_id", job.ID, "error", err)
+		r.log.Error("complete job", "job_id", job.ID, "job_type", job.Type, "worker_id", r.id, "trace_id", traceID, "error", err)
 	} else if !updated {
-		r.log.Warn("job completion rejected by lease fence", "job_id", job.ID, "worker_id", r.id)
+		r.log.Warn("job completion rejected by lease fence", "job_id", job.ID, "job_type", job.Type, "worker_id", r.id, "trace_id", traceID)
 	}
 }
 

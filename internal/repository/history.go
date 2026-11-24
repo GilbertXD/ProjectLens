@@ -19,7 +19,7 @@ func (r *PostgresRepositoryStore) HistorySize(ctx context.Context, id uuid.UUID,
 	return n, err
 }
 func (r *PostgresRepositoryStore) MissingCommits(ctx context.Context, id uuid.UUID, shas []string) (map[string]bool, error) {
-	rows, err := db.ConnFromContext(ctx, r.pool).Query(ctx, "SELECT id FROM unnest($2::text[]) AS wanted(id) WHERE NOT EXISTS(SELECT 1 FROM repository_commits c WHERE c.repository_id=$1 AND c.sha=wanted.id)", id, shas)
+	rows, err := r.pool.Query(ctx, "SELECT id FROM unnest($2::text[]) AS wanted(id) WHERE NOT EXISTS(SELECT 1 FROM repository_commits c WHERE c.repository_id=$1 AND c.sha=wanted.id)", id, shas)
 	if err != nil {
 		return nil, err
 	}
@@ -53,7 +53,11 @@ func (r *PostgresRepositoryStore) HistoryList(ctx context.Context, id uuid.UUID,
 func (r *PostgresRepositoryStore) Commit(ctx context.Context, id uuid.UUID, sha string, files bool, limit, offset int) (json.RawMessage, error) {
 	col := "metadata"
 	if files {
-		col = `jsonb_build_object('truncated',changes->'truncated','total',jsonb_array_length(changes->'files'),'items',coalesce((SELECT jsonb_agg(f) FROM (SELECT value f FROM jsonb_array_elements(changes->'files') LIMIT $3 OFFSET $4) page),'[]'))`
+		col = `jsonb_build_object('truncated',changes->'truncated','total',jsonb_array_length(changes->'files'),
+			'items',coalesce((SELECT jsonb_agg(f ORDER BY ord) FROM (
+				SELECT f, ord FROM jsonb_array_elements(changes->'files') WITH ORDINALITY AS elem(f, ord)
+				ORDER BY ord LIMIT $3 OFFSET $4
+			) page),'[]'))`
 	}
 	args := []any{id, sha}
 	if files {

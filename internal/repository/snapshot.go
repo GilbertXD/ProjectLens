@@ -38,7 +38,15 @@ func NewPostgresSnapshotStore(ctx context.Context, pool *pgxpool.Pool) (*Postgre
 func (s *PostgresSnapshotStore) Close() { s.lockPool.Close() }
 
 func (s *PostgresSnapshotStore) AcquireRepoSyncLock(ctx context.Context, repoID uuid.UUID) (func(), error) {
-	hash := sha256.Sum256([]byte("projectlens:repo-sync:" + repoID.String()))
+	return s.AcquireScopedSyncLock(ctx, "", repoID)
+}
+
+func (s *PostgresSnapshotStore) AcquireScopedSyncLock(ctx context.Context, scope string, repoID uuid.UUID) (func(), error) {
+	key := "projectlens:repo-sync:"
+	if scope != "" {
+		key += scope + ":"
+	}
+	hash := sha256.Sum256([]byte(key + repoID.String()))
 	first := int32(binary.BigEndian.Uint32(hash[:4]))
 	second := int32(binary.BigEndian.Uint32(hash[4:8]))
 	ticker := time.NewTicker(25 * time.Millisecond)

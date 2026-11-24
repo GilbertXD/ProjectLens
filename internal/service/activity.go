@@ -27,7 +27,7 @@ type ActivityService struct {
 
 func (s *ActivityService) Sync(ctx context.Context, target domain.SyncTarget) (int, error) {
 	id := target.RepositoryID
-	unlock, err := s.Locks.AcquireRepoSyncLock(ctx, id)
+	unlock, err := s.Locks.AcquireScopedSyncLock(ctx, "github_activity", id)
 	if err != nil {
 		return 0, err
 	}
@@ -39,14 +39,25 @@ func (s *ActivityService) Sync(ctx context.Context, target domain.SyncTarget) (i
 	if repo.SourceType != domain.RepositorySourceGitHub {
 		return 0, fmt.Errorf("%w: expected GitHub repository", domain.ErrInvalidInput)
 	}
+	if repo.GitHubOwner == nil || repo.GitHubRepo == nil || *repo.GitHubOwner == "" || *repo.GitHubRepo == "" {
+		return 0, fmt.Errorf("%w: missing GitHub owner or repository", domain.ErrInvalidInput)
+	}
 	until, err := s.Repositories.ActivityBackoff(ctx, id)
 	if err != nil {
 		return 0, err
 	}
 	if until != nil {
-		return 0, &github.RetryError{Delay: time.Until(*until)}
+		return 0, &github.RetryError{Delay: max(0, time.Until(*until))}
 	}
 	owner, name := *repo.GitHubOwner, *repo.GitHubRepo
+	cursor, full, err := s.Repositories.ActivityCursor(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+	cachedPulls, err := s.Repositories.CachedPulls(ctx, id)
+	if err != nil {
+		return 0, err
+	}
 	meta, err := s.Client.PublicActivityMetadata(ctx, owner, name)
 	if err != nil {
 		return 0, err
@@ -58,123 +69,143 @@ func (s *ActivityService) Sync(ctx context.Context, target domain.SyncTarget) (i
 	if err != nil {
 		return 0, err
 	}
-	cursor, full, err := s.Repositories.ActivityCursor(ctx, id)
-	if err != nil {
-		return 0, err
-	}
 	start := time.Now().UTC()
 	reconcile := start.Sub(full) >= 24*time.Hour
 	query := url.Values{}
-	if !reconcile && !cursor.IsZero() {
+	epoch := time.Unix(0, 0).UTC()
+	if !reconcile && cursor.After(epoch) {
 		query.Set("since", cursor.Add(-2*time.Minute).Format(time.RFC3339))
 	}
-	batch := uuid.New()
-	saved := 0
-	err = s.Tx.WithinTx(ctx, func(ctx context.Context) error {
-		save := func(kind string, n int, a github.Activity, etag string) error {
-			key := strconv.FormatInt(a.ID, 10)
-			if kind == "commit" {
-				key = a.SHA
-				if !gitscan.ValidSHA(key) {
-					return fmt.Errorf("%w: invalid associated SHA", domain.ErrInvalidInput)
-				}
-			} else if a.ID <= 0 {
-				return fmt.Errorf("%w: missing GitHub ID", domain.ErrInvalidInput)
+	type stagedActivity struct {
+		kind, key string
+		number    int
+		activity  github.Activity
+		etag      string
+	}
+	var records []stagedActivity
+	var refreshed []int
+	stage := func(kind string, n int, a github.Activity, etag string) error {
+		key := strconv.FormatInt(a.ID, 10)
+		if kind == "commit" {
+			key = a.SHA
+			if !gitscan.ValidSHA(key) {
+				return fmt.Errorf("%w: invalid associated SHA", domain.ErrInvalidInput)
 			}
-			if n <= 0 {
-				return fmt.Errorf("%w: invalid resource number", domain.ErrInvalidInput)
-			}
-			if kind != "commit" {
-				if a.UpdatedAt.IsZero() || a.CreatedAt.IsZero() {
-					return fmt.Errorf("%w: GitHub activity is missing timestamps", domain.ErrInvalidInput)
-				}
-				if a.UpdatedAt.After(cursor) && !a.UpdatedAt.After(start) {
-					cursor = a.UpdatedAt
-				}
-			}
-			saved++
-			return s.Repositories.SaveActivity(ctx, id, batch, kind, key, n, a, etag)
+		} else if a.ID <= 0 {
+			return fmt.Errorf("%w: missing GitHub ID", domain.ErrInvalidInput)
 		}
-		parents := url.Values{"state": {"all"}, "sort": {"updated"}, "direction": {"asc"}}
-		if since := query.Get("since"); since != "" {
-			parents.Set("since", since)
+		if n <= 0 {
+			return fmt.Errorf("%w: invalid resource number", domain.ErrInvalidInput)
 		}
-		seen := map[int]bool{}
-		err := feed.List(ctx, "issues", parents, func(a github.Activity) error {
-			n := a.Number
-			if a.Pull == nil {
-				return save("issue", n, a, "")
+		if kind != "commit" {
+			if a.UpdatedAt.IsZero() || a.CreatedAt.IsZero() {
+				return fmt.Errorf("%w: GitHub activity is missing timestamps", domain.ErrInvalidInput)
 			}
-			if seen[n] {
+			if a.UpdatedAt.After(cursor) && !a.UpdatedAt.After(start) {
+				cursor = a.UpdatedAt
+			}
+		}
+		records = append(records, stagedActivity{kind, key, n, a, etag})
+		return nil
+	}
+	parents := url.Values{"state": {"all"}, "sort": {"updated"}, "direction": {"asc"}}
+	if since := query.Get("since"); since != "" {
+		parents.Set("since", since)
+	}
+	seen := map[int]bool{}
+	err = feed.List(ctx, "issues", parents, func(a github.Activity) error {
+		n := a.Number
+		if a.Pull == nil {
+			return stage("issue", n, a, "")
+		}
+		if n <= 0 || a.ID <= 0 || a.CreatedAt.IsZero() || a.UpdatedAt.IsZero() {
+			return fmt.Errorf("%w: incomplete GitHub pull request listing", domain.ErrInvalidInput)
+		}
+		if seen[n] {
+			return nil
+		}
+		seen[n] = true
+		cached := cachedPulls[n]
+		pr, tag, same, err := feed.Pull(ctx, n, cached.ETag)
+		if err != nil {
+			return err
+		}
+		if same {
+			pr = cached.Activity
+		}
+		if err := stage("pull", n, pr, tag); err != nil {
+			return err
+		}
+		if same && !reconcile {
+			return nil
+		}
+		if pr.Commits > 250 {
+			return fmt.Errorf("%w: PR exceeds GitHub commit listing limit", domain.ErrInvalidInput)
+		}
+		links := map[string]bool{}
+		err = feed.List(ctx, "pulls/"+strconv.Itoa(n)+"/commits", nil, func(link github.Activity) error {
+			if links[link.SHA] {
 				return nil
 			}
-			seen[n] = true
-			cached, etag, err := s.Repositories.CachedPull(ctx, id, n)
-			if err != nil {
-				return err
-			}
-			pr, tag, same, err := feed.Pull(ctx, n, etag)
-			if err != nil {
-				return err
-			}
-			if same {
-				pr = cached
-			}
-			if err := save("pull", n, pr, tag); err != nil {
-				return err
-			}
-			if same && !reconcile {
-				return nil
-			}
-			if pr.Commits > 250 {
-				return fmt.Errorf("%w: PR exceeds GitHub commit listing limit", domain.ErrInvalidInput)
-			}
-			links := map[string]bool{}
-			err = feed.List(ctx, "pulls/"+strconv.Itoa(n)+"/commits", nil, func(link github.Activity) error {
-				if links[link.SHA] {
-					return nil
-				}
-				links[link.SHA] = true
-				return save("commit", n, link, "")
-			})
-			if err != nil {
-				return err
-			}
-			if len(links) != pr.Commits {
-				return fmt.Errorf("%w: PR commit count changed during fetch", domain.ErrUpstreamUnavailable)
-			}
-			return s.Repositories.ClearOldLinks(ctx, id, batch, n)
+			links[link.SHA] = true
+			return stage("commit", n, link, "")
 		})
 		if err != nil {
 			return err
 		}
-		for _, source := range []struct{ route, kind string }{{"issues/comments", "comment"}, {"pulls/comments", "review_comment"}} {
-			err := feed.List(ctx, source.route, query, func(a github.Activity) error {
-				raw := a.IssueURL
-				if source.kind == "review_comment" {
-					raw = a.PullURL
-				}
-				u, err := url.Parse(raw)
-				if err != nil || !strings.HasSuffix(strings.ToLower(path.Dir(u.Path)), "/repos/"+strings.ToLower(owner+"/"+name)+"/"+strings.Split(source.route, "/")[0]) {
-					return fmt.Errorf("%w: invalid comment parent", domain.ErrInvalidInput)
-				}
-				n, err := strconv.Atoi(path.Base(u.Path))
-				if err != nil {
-					return fmt.Errorf("%w: invalid comment number", domain.ErrInvalidInput)
-				}
-				return save(source.kind, n, a, "")
-			})
+		if len(links) != pr.Commits {
+			return fmt.Errorf("%w: PR commit count changed during fetch", domain.ErrUpstreamUnavailable)
+		}
+		refreshed = append(refreshed, n)
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	for _, source := range []struct{ route, kind string }{{"issues/comments", "comment"}, {"pulls/comments", "review_comment"}} {
+		err := feed.List(ctx, source.route, query, func(a github.Activity) error {
+			raw := a.IssueURL
+			if source.kind == "review_comment" {
+				raw = a.PullURL
+			}
+			u, err := url.Parse(raw)
+			if err != nil || !strings.HasSuffix(strings.ToLower(path.Dir(u.Path)), "/repos/"+strings.ToLower(owner+"/"+name)+"/"+strings.Split(source.route, "/")[0]) {
+				return fmt.Errorf("%w: invalid comment parent", domain.ErrInvalidInput)
+			}
+			n, err := strconv.Atoi(path.Base(u.Path))
 			if err != nil {
+				return fmt.Errorf("%w: invalid comment number", domain.ErrInvalidInput)
+			}
+			return stage(source.kind, n, a, "")
+		})
+		if err != nil {
+			return 0, err
+		}
+	}
+	if reconcile {
+		full = start
+	}
+	if cursor.IsZero() {
+		cursor = epoch
+	}
+	batch := uuid.New()
+	err = s.Tx.WithinTx(ctx, func(ctx context.Context) error {
+		for _, record := range records {
+			if err := s.Repositories.SaveActivity(ctx, id, batch, record.kind, record.key, record.number, record.activity, record.etag); err != nil {
 				return err
 			}
 		}
-		if reconcile {
-			full = start
-		}
-		if cursor.IsZero() {
-			cursor = time.Unix(0, 0).UTC()
+		if !reconcile {
+			for _, n := range refreshed {
+				if err := s.Repositories.ClearOldLinks(ctx, id, batch, n); err != nil {
+					return err
+				}
+			}
 		}
 		return s.Repositories.FinishActivity(ctx, id, batch, cursor, full, reconcile)
 	})
-	return saved, err
+	if err != nil {
+		return 0, err
+	}
+	return len(records), nil
 }

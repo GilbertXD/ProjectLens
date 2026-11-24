@@ -158,20 +158,48 @@ func TestProjectLifecycle(t *testing.T) {
 	}
 	// Exercise an upgrade from a populated v1 schema before testing its older rollbacks.
 	var legacyID uuid.UUID
+	legacyRepoID, legacyJobID := uuid.New(), uuid.New()
 	if err := pool.QueryRow(ctx, "INSERT INTO projects(id,slug,name,description,status) VALUES(gen_random_uuid(),'legacy','Legacy','','active') RETURNING id").Scan(&legacyID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO repositories
+		(id,project_id,source_type,name,source,canonical_source,default_branch,description,remote_url,local_path)
+		VALUES($1,$2,'local_git','Legacy repository','/legacy','/legacy','main','','','/legacy')`, legacyRepoID, legacyID); err != nil {
+		t.Fatal(err)
+	}
+	legacyTarget := domain.SyncTarget{ProjectID: legacyID, RepositoryID: legacyRepoID, Ref: "main"}
+	if _, err := pool.Exec(ctx, "INSERT INTO jobs(id,type,status,payload) VALUES($1,'repository.sync','pending',$2)", legacyJobID, legacyTarget); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.MigrateUp(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	var preserved string
-	if err := pool.QueryRow(ctx, "SELECT name FROM projects WHERE id=$1", legacyID).Scan(&preserved); err != nil || preserved != "Legacy" {
-		t.Fatal(preserved, err)
+	legacyProject, err := repository.NewPostgresProjectRepository(pool).GetByID(ctx, legacyID)
+	if err != nil || legacyProject.Name != "Legacy" {
+		t.Fatal(legacyProject, err)
+	}
+	legacyRepo, err := repository.NewPostgresRepositoryStore(pool).GetByID(ctx, legacyID, legacyRepoID)
+	if err != nil || legacyRepo.Name != "Legacy repository" || legacyRepo.LocalPath == nil || *legacyRepo.LocalPath != "/legacy" {
+		t.Fatal(legacyRepo, err)
+	}
+	job, err := repository.NewPostgresJobStore(pool).GetByID(ctx, legacyJobID)
+	if err != nil || job.Type != "repository.sync" || job.Status != domain.JobPending || job.TraceParent != "" {
+		t.Fatal(job, err)
+	}
+	var persisted domain.SyncTarget
+	if err := json.Unmarshal(job.Payload, &persisted); err != nil || persisted != legacyTarget {
+		t.Fatal(persisted, err)
 	}
 	for range 5 {
 		if err := db.MigrateDown(ctx, pool); err != nil {
 			t.Fatal(err)
 		}
+	}
+	var preserved bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM projects p JOIN repositories r ON r.project_id=p.id JOIN jobs j ON j.payload->>'repository_id'=r.id::text
+		WHERE p.id=$1 AND r.id=$2 AND j.id=$3 AND j.status='pending')`, legacyID, legacyRepoID, legacyJobID).Scan(&preserved); err != nil || !preserved {
+		t.Fatalf("v11 to v6 rollback lost legacy rows: preserved=%t, err=%v", preserved, err)
 	}
 	if err := db.MigrateDown(ctx, pool); err != nil {
 		t.Fatalf("migrate unified search down: %v", err)

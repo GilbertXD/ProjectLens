@@ -79,15 +79,34 @@ func (h *JobHandler) enqueue(c *gin.Context) {
 func (h *JobHandler) syncRepository(kind string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var ref string
-		if c.Request.ContentLength != 0 {
-			input, err := decodeRepository[struct {
+		if c.Request.Body != nil {
+			var input *struct {
 				Ref string `json:"ref"`
-			}](c)
-			if err != nil {
-				h.respond(c, 0, nil, err)
-				return
 			}
-			ref = input.Ref
+			decoder := json.NewDecoder(c.Request.Body)
+			decoder.DisallowUnknownFields()
+			err := decoder.Decode(&input)
+			cause := requestLimitCause(c, err)
+			switch {
+			case cause != nil:
+				h.respond(c, 0, nil, cause)
+				return
+			case err == io.EOF:
+			case err != nil || input == nil:
+				h.respond(c, 0, nil, fmt.Errorf("%w: body must be a valid repository JSON object", domain.ErrInvalidInput))
+				return
+			default:
+				err := decoder.Decode(new(json.RawMessage))
+				if cause := requestLimitCause(c, err); cause != nil {
+					h.respond(c, 0, nil, cause)
+					return
+				}
+				if err != io.EOF {
+					h.respond(c, 0, nil, fmt.Errorf("%w: body must contain a single JSON value", domain.ErrInvalidInput))
+					return
+				}
+				ref = input.Ref
+			}
 		}
 		payload, _ := json.Marshal(gin.H{"project_id": c.Param("id"), "repository_id": c.Param("repoId"), "ref": ref})
 		job, created, err := h.service.Enqueue(c.Request.Context(), domain.CreateJobInput{Type: kind, Payload: payload})

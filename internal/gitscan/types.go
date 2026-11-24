@@ -7,10 +7,11 @@ import (
 )
 
 type SourceSpec struct {
-	depth      int
-	SourceType domain.RepositorySourceType
-	Source     string
-	Ref        string
+	depth       int
+	compareBase string
+	SourceType  domain.RepositorySourceType
+	Source      string
+	Ref         string
 }
 
 type PreparedRepo struct {

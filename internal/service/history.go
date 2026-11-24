@@ -29,7 +29,7 @@ func sourceSpec(repo domain.Repository, ref string) gitscan.SourceSpec {
 }
 func (s *HistoryService) Sync(ctx context.Context, target domain.SyncTarget) (gitscan.HistoryPageResult, error) {
 	var page gitscan.HistoryPageResult
-	release, err := s.Locks.AcquireRepoSyncLock(ctx, target.RepositoryID)
+	release, err := s.Locks.AcquireScopedSyncLock(ctx, "commits", target.RepositoryID)
 	if err != nil {
 		return page, err
 	}
@@ -46,13 +46,25 @@ func (s *HistoryService) Sync(ctx context.Context, target domain.SyncTarget) (gi
 	if err != nil {
 		return page, err
 	}
+	type stagedCommit struct {
+		item    gitscan.HistoryCommit
+		changes gitscan.Changes
+	}
+	var commits []stagedCommit
+	page, err = s.Scanner.History(ctx, sourceSpec(repo, ref), size+gitscan.HistoryPage, func(ids []string) (map[string]bool, error) {
+		return s.Repositories.MissingCommits(ctx, repo.ID, ids)
+	}, func(item gitscan.HistoryCommit, changes gitscan.Changes) error {
+		commits = append(commits, stagedCommit{item, changes})
+		return nil
+	})
+	if err != nil {
+		return page, err
+	}
 	err = s.Tx.WithinTx(ctx, func(ctx context.Context) error {
-		var e error
-		page, e = s.Scanner.History(ctx, sourceSpec(repo, ref), size+gitscan.HistoryPage, func(ids []string) (map[string]bool, error) { return s.Repositories.MissingCommits(ctx, repo.ID, ids) }, func(item gitscan.HistoryCommit, changes gitscan.Changes) error {
-			return s.Repositories.StoreCommit(ctx, repo.ID, item, changes)
-		})
-		if e != nil {
-			return e
+		for _, commit := range commits {
+			if err := s.Repositories.StoreCommit(ctx, repo.ID, commit.item, commit.changes); err != nil {
+				return err
+			}
 		}
 		return s.Repositories.PublishHistory(ctx, repo.ID, ref, page)
 	})
