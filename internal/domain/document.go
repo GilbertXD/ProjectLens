@@ -21,18 +21,12 @@ func DocumentScope(repositoryID *uuid.UUID) KnowledgeScope {
 }
 
 // DocumentOrigin records the repository a document belonged to before that
-// repository was disassociated. It is informational provenance only: it never
-// grants repository scope or ownership.
+// repository was disassociated. The service maintains it: it is read-only for
+// clients, informational provenance only, and never grants repository scope or
+// ownership.
 type DocumentOrigin struct {
 	RepositoryID   uuid.UUID `json:"repository_id"`
 	RepositoryName string    `json:"repository_name"`
-}
-
-// OriginPatch describes an optional provenance change on a document write.
-// A nil Origin with Clear unset leaves the stored origin untouched.
-type OriginPatch struct {
-	Origin *DocumentOrigin
-	Clear  bool
 }
 
 type Document struct {
@@ -72,18 +66,12 @@ type UpdateDocumentInput struct {
 	Title   string `json:"title"`
 	Content string `json:"content"`
 	Version int64  `json:"version"`
-	// Origin replaces the stored provenance. A nil Origin clears it.
-	Origin *DocumentOrigin `json:"origin,omitempty"`
 }
 
 type PatchDocumentInput struct {
 	Title   *string `json:"title"`
 	Content *string `json:"content"`
 	Version int64   `json:"version"`
-	// Origin sets the stored provenance when non-nil; ClearOrigin removes it.
-	// Leaving both unset keeps the stored provenance unchanged.
-	Origin      *DocumentOrigin `json:"origin,omitempty"`
-	ClearOrigin bool            `json:"-"`
 }
 
 type ListDocumentsFilter struct {

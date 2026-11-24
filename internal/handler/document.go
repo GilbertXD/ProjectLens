@@ -218,10 +218,9 @@ func (h *DocumentHandler) get(c *gin.Context, repositoryID *uuid.UUID) {
 
 func (h *DocumentHandler) update(c *gin.Context, repositoryID *uuid.UUID) {
 	input, err := decodeDocument[struct {
-		Title   string                 `json:"title"`
-		Content string                 `json:"content"`
-		Version json.RawMessage        `json:"version"`
-		Origin  *domain.DocumentOrigin `json:"origin"`
+		Title   string          `json:"title"`
+		Content string          `json:"content"`
+		Version json.RawMessage `json:"version"`
 	}](c, h.maxBodyBytes)
 	if err != nil {
 		h.writeError(c, err)
@@ -233,27 +232,8 @@ func (h *DocumentHandler) update(c *gin.Context, repositoryID *uuid.UUID) {
 		return
 	}
 	doc, err := h.service.Update(c.Request.Context(), c.Param("id"), c.Param("docId"), repositoryID,
-		domain.UpdateDocumentInput{Title: input.Title, Content: input.Content, Version: version, Origin: input.Origin})
+		domain.UpdateDocumentInput{Title: input.Title, Content: input.Content, Version: version})
 	h.respond(c, http.StatusOK, doc, err)
-}
-
-// documentOriginPatch reads the tri-state PATCH origin value. An absent field
-// leaves the stored provenance untouched, null clears it, and an object
-// replaces it.
-func documentOriginPatch(raw json.RawMessage) (*domain.DocumentOrigin, bool, error) {
-	if len(raw) == 0 {
-		return nil, false, nil
-	}
-	if string(bytes.TrimSpace(raw)) == "null" {
-		return nil, true, nil
-	}
-	var origin *domain.DocumentOrigin
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&origin); err != nil || origin == nil {
-		return nil, false, fmt.Errorf("%w: origin must be null or an object with repository_id and repository_name", domain.ErrInvalidInput)
-	}
-	return origin, true, nil
 }
 
 func (h *DocumentHandler) patch(c *gin.Context, repositoryID *uuid.UUID) {
@@ -261,7 +241,6 @@ func (h *DocumentHandler) patch(c *gin.Context, repositoryID *uuid.UUID) {
 		Title   *string         `json:"title"`
 		Content *string         `json:"content"`
 		Version json.RawMessage `json:"version"`
-		Origin  json.RawMessage `json:"origin"`
 	}](c, h.maxBodyBytes)
 	if err != nil {
 		h.writeError(c, err)
@@ -272,16 +251,8 @@ func (h *DocumentHandler) patch(c *gin.Context, repositoryID *uuid.UUID) {
 		h.writeError(c, err)
 		return
 	}
-	origin, originTouched, err := documentOriginPatch(input.Origin)
-	if err != nil {
-		h.writeError(c, err)
-		return
-	}
 	doc, err := h.service.Patch(c.Request.Context(), c.Param("id"), c.Param("docId"), repositoryID,
-		domain.PatchDocumentInput{
-			Title: input.Title, Content: input.Content, Version: version,
-			Origin: origin, ClearOrigin: originTouched && origin == nil,
-		})
+		domain.PatchDocumentInput{Title: input.Title, Content: input.Content, Version: version})
 	h.respond(c, http.StatusOK, doc, err)
 }
 

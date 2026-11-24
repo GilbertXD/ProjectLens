@@ -3,7 +3,6 @@ package handler
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http/httptest"
@@ -21,8 +20,6 @@ type documentServiceStub struct {
 	version      int64
 	filter       domain.ListDocumentsFilter
 	err          error
-	origin       *domain.DocumentOrigin
-	clearOrigin  bool
 }
 
 func (s *documentServiceStub) Create(_ context.Context, _ string, input domain.CreateDocumentInput) (domain.Document, error) {
@@ -50,8 +47,7 @@ func (s *documentServiceStub) Update(_ context.Context, _, _ string, repositoryI
 func (s *documentServiceStub) Patch(_ context.Context, _, _ string, repositoryID *uuid.UUID, input domain.PatchDocumentInput) (domain.Document, error) {
 	s.repositoryID = repositoryID
 	s.version = input.Version
-	s.origin, s.clearOrigin = input.Origin, input.ClearOrigin
-	if input.Title == nil && input.Content == nil && input.Origin == nil && !input.ClearOrigin {
+	if input.Title == nil && input.Content == nil {
 		return domain.Document{}, domain.ErrInvalidInput
 	}
 	return domain.Document{Version: input.Version + 1}, s.err
@@ -183,32 +179,22 @@ func TestDocumentHandlerRepositoryRoutes(t *testing.T) {
 	}
 }
 
-func TestDocumentHandlerOrigin(t *testing.T) {
-	const item = "/api/v1/projects/project/documents/doc"
-	repo := uuid.New()
-	origin := domain.DocumentOrigin{RepositoryID: repo, RepositoryName: "Former"}
+// TestDocumentHandlerRejectsOriginWrites pins origin as service-maintained
+// provenance: clients may read it, but no document write may set or clear it.
+func TestDocumentHandlerRejectsOriginWrites(t *testing.T) {
+	const item = "/api/v1/projects/project/documents/6ba7b810-9dad-11d1-80b4-00c04fd430c8"
 	for _, tc := range []struct {
-		name, body string
-		wantOrigin *domain.DocumentOrigin
-		wantClear  bool
-		status     int
+		name, method, body string
 	}{
-		{name: "set", body: fmt.Sprintf(`{"version":1,"origin":{"repository_id":%q,"repository_name":"Former"}}`, repo), wantOrigin: &origin, status: 200},
-		{name: "clear", body: `{"version":1,"origin":null}`, wantClear: true, status: 200},
-		{name: "keep", body: `{"version":1,"title":"Title"}`, status: 200},
-		{name: "non-object origin", body: `{"version":1,"origin":"Former"}`, status: 400},
-		{name: "unknown origin field", body: fmt.Sprintf(`{"version":1,"origin":{"repository_id":%q,"repository_name":"x","typo":1}}`, repo), status: 400},
+		{name: "PUT origin", method: "PUT", body: `{"title":"Title","version":1,"origin":{"repository_id":"6ba7b811-9dad-11d1-80b4-00c04fd430c8","repository_name":"Former"}}`},
+		{name: "PATCH origin", method: "PATCH", body: `{"version":1,"origin":{"repository_id":"6ba7b811-9dad-11d1-80b4-00c04fd430c8","repository_name":"Former"}}`},
+		{name: "PATCH null origin", method: "PATCH", body: `{"version":1,"origin":null}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			svc := &documentServiceStub{}
 			w := httptest.NewRecorder()
-			documentTestRouter(svc).ServeHTTP(w, httptest.NewRequest("PATCH", item, strings.NewReader(tc.body)))
-			if w.Code != tc.status {
-				t.Fatalf("status = %d %s, want %d", w.Code, w.Body, tc.status)
-			}
-			same := (svc.origin == nil) == (tc.wantOrigin == nil) && (svc.origin == nil || *svc.origin == *tc.wantOrigin)
-			if !same || svc.clearOrigin != tc.wantClear {
-				t.Fatalf("origin = %+v, clear = %t, want %+v / %t", svc.origin, svc.clearOrigin, tc.wantOrigin, tc.wantClear)
+			documentTestRouter(&documentServiceStub{}).ServeHTTP(w, httptest.NewRequest(tc.method, item, strings.NewReader(tc.body)))
+			if w.Code != 400 || !strings.Contains(w.Body.String(), "invalid_input") {
+				t.Fatalf("%s %s = %d %s, want 400 invalid_input", tc.method, tc.body, w.Code, w.Body)
 			}
 		})
 	}

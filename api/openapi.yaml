@@ -368,7 +368,7 @@ paths:
     delete:
       operationId: "deleteRepository"
       summary: "Disassociate a repository"
-      description: "Removes the repository's snapshots, files, history, GitHub activity, and sync policies, and requests cancellation of active jobs targeting the repository. Repository-owned documents survive as project-level documents that record the repository under origin."
+      description: "Removes the repository's snapshots, files, history, GitHub activity, and sync policies, and requests cancellation of active jobs targeting the repository. Repository-owned documents survive as project-level documents that record the repository under the read-only origin field and gain a new version."
       security:
         - {"BearerAuth": []}
       responses:
@@ -2195,7 +2195,8 @@ components:
         updated_at: {"type": "string", "format": "date-time"}
     DocumentOrigin:
       type: "object"
-      description: "Informational provenance of a document whose repository was disassociated. Provenance never grants repository scope or ownership."
+      description: "Service-maintained provenance of a document whose repository was disassociated. Clients read it; document writes reject it. Provenance never grants repository scope or ownership."
+      readOnly: true
       required: ["repository_id", "repository_name"]
       properties:
         repository_id: {"type": "string", "format": "uuid"}
@@ -2216,10 +2217,6 @@ components:
         title: {"type": "string"}
         content: {"type": "string"}
         version: {"type": "integer", "minimum": 1}
-        origin:
-          allOf: [{"$ref": "#/components/schemas/DocumentOrigin"}]
-          nullable: true
-          description: "Replaces the stored provenance. Omitting it or sending null clears it."
       additionalProperties: false
     DocumentPatch:
       type: "object"
@@ -2227,10 +2224,6 @@ components:
         title: {"type": "string"}
         content: {"type": "string"}
         version: {"type": "integer", "minimum": 1}
-        origin:
-          allOf: [{"$ref": "#/components/schemas/DocumentOrigin"}]
-          nullable: true
-          description: "Sets the stored provenance. Sending null clears it. Omitting it leaves it unchanged."
       additionalProperties: false
     DocumentListResult:
       type: "object"

@@ -116,30 +116,17 @@ func (r *PostgresDocumentStore) ListByProject(ctx context.Context, projectID uui
 	return result, nil
 }
 
-func (r *PostgresDocumentStore) Update(ctx context.Context, projectID, docID uuid.UUID, repositoryID *uuid.UUID, expectedVersion int64, title, content string, origin domain.OriginPatch) (domain.Document, error) {
-	return r.Patch(ctx, projectID, docID, repositoryID, expectedVersion, &title, &content, origin)
+func (r *PostgresDocumentStore) Update(ctx context.Context, projectID, docID uuid.UUID, repositoryID *uuid.UUID, expectedVersion int64, title, content string) (domain.Document, error) {
+	return r.Patch(ctx, projectID, docID, repositoryID, expectedVersion, &title, &content)
 }
 
-func (r *PostgresDocumentStore) Patch(ctx context.Context, projectID, docID uuid.UUID, repositoryID *uuid.UUID, expectedVersion int64, title, content *string, origin domain.OriginPatch) (domain.Document, error) {
+func (r *PostgresDocumentStore) Patch(ctx context.Context, projectID, docID uuid.UUID, repositoryID *uuid.UUID, expectedVersion int64, title, content *string) (domain.Document, error) {
 	conn := db.ConnFromContext(ctx, r.pool)
-	var originJSON *string
-	if origin.Origin != nil {
-		encoded, err := json.Marshal(origin.Origin)
-		if err != nil {
-			return domain.Document{}, err
-		}
-		value := string(encoded)
-		originJSON = &value
-	}
 	doc, err := scanDocument(conn.QueryRow(ctx, `
 		UPDATE documents SET title = COALESCE($4, title), content = COALESCE($5, content),
-			metadata = CASE
-				WHEN $7::jsonb IS NOT NULL THEN jsonb_set(metadata, '{origin}', $7::jsonb)
-				WHEN $8::boolean THEN metadata - 'origin'
-				ELSE metadata END,
 			version = version + 1, updated_at = NOW()
 		WHERE project_id = $1 AND id = $2 AND version = $3 AND ($6::uuid IS NULL OR repository_id = $6) RETURNING `+documentColumns,
-		projectID, docID, expectedVersion, title, content, repositoryID, originJSON, origin.Clear))
+		projectID, docID, expectedVersion, title, content, repositoryID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return doc, documentVersionMiss(ctx, conn, projectID, docID, repositoryID, expectedVersion)
 	}

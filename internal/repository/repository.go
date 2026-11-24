@@ -108,45 +108,36 @@ func (r *PostgresRepositoryStore) UpdateMetadata(ctx context.Context, repo domai
 		repo.GitHubRepoID, repo.GitHubVisibility, repo.GitHubStars, repo.GitHubLanguage, repo.LastSyncedAt))
 }
 
-// disassociationDeletes removes a repository's derived rows before the
-// repository row itself. Deleting children first keeps the search-version
-// triggers able to resolve the repository, and leaves the foreign keys as a
-// safety net instead of the only guard.
-var disassociationDeletes = []string{
-	"DELETE FROM source_files WHERE repository_id = $1",
-	"DELETE FROM snapshots WHERE repository_id = $1",
-	"DELETE FROM repository_commits WHERE repository_id = $1",
-	"DELETE FROM repository_history_refs WHERE repository_id = $1",
-	"DELETE FROM github_activity WHERE repository_id = $1",
-	"DELETE FROM github_activity_state WHERE repository_id = $1",
-	"DELETE FROM sync_policies WHERE repository_id = $1",
-}
-
 func (r *PostgresRepositoryStore) Delete(ctx context.Context, projectID, repoID uuid.UUID) error {
 	err := db.NewPgxTxManager(r.pool).WithinTx(ctx, func(ctx context.Context) error {
 		conn := db.ConnFromContext(ctx, r.pool)
+		// Lock the repository row first. Foreign-key checks on document writes
+		// hold FOR KEY SHARE on this row, so this lock serialises concurrent
+		// document creation and re-association against disassociation instead of
+		// letting a late document escape without provenance.
 		var name string
-		err := conn.QueryRow(ctx, "SELECT name FROM repositories WHERE project_id = $1 AND id = $2", projectID, repoID).Scan(&name)
+		err := conn.QueryRow(ctx, "SELECT name FROM repositories WHERE project_id = $1 AND id = $2 FOR UPDATE", projectID, repoID).Scan(&name)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return domain.ErrNotFound
 		}
 		if err != nil {
 			return err
 		}
-		// Documents are user-authored notes, so they survive disassociation as
-		// project-level documents that keep the repository as provenance. The
-		// scope itself is cleared by the repository foreign key.
+		// Documents are user-authored notes, so they survive as project-level
+		// documents that keep the repository as read-only provenance. The version
+		// bump and fresh updated_at invalidate ETags held by clients that saw the
+		// repository scope, so a stale write cannot silently overwrite the shift.
 		if _, err := conn.Exec(ctx, `
 			UPDATE documents SET metadata = jsonb_set(metadata, '{origin}',
-				jsonb_build_object('repository_id', $2::text, 'repository_name', $3))
+				jsonb_build_object('repository_id', $2::text, 'repository_name', $3)),
+				version = version + 1, updated_at = NOW()
 			WHERE project_id = $1 AND repository_id = $2`, projectID, repoID, name); err != nil {
 			return err
 		}
-		for _, statement := range disassociationDeletes {
-			if _, err := conn.Exec(ctx, statement, repoID); err != nil {
-				return err
-			}
-		}
+		// Snapshots, source files, history, GitHub activity, and sync policies
+		// cascade from the repository row, and the same delete clears the scope of
+		// surviving documents. The bump_repository_search_version trigger still
+		// invalidates the project's search cache.
 		if _, err := conn.Exec(ctx, "DELETE FROM repositories WHERE project_id = $1 AND id = $2", projectID, repoID); err != nil {
 			return err
 		}

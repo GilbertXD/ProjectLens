@@ -256,11 +256,11 @@ func TestMultiRepositoryIsolation(t *testing.T) {
 		if tc.projectDoc {
 			projectNote = projectDoc
 		}
-		assertIsolationSearch(t, result, base, projectNote, tc.filesOnly, tc.repos...)
+		assertIsolationSearch(t, result, base, projectDocuments(projectNote), tc.filesOnly, tc.repos...)
 	}
 	filtered := projectSearch + "&repository_role=primary"
 	primaries := searchRequest(t, api, filtered, domain.SearchCacheStatusMiss)
-	assertIsolationSearch(t, primaries, base, domain.Document{}, false, a, b)
+	assertIsolationSearch(t, primaries, base, nil, false, a, b)
 	searchRequest(t, api, filtered, domain.SearchCacheStatusHit)
 	request(t, api, "PATCH", a.path, `{"role":"reference"}`, 200, &a.Repository)
 	if a.Role != domain.RepositoryRoleReference {
@@ -270,8 +270,8 @@ func TestMultiRepositoryIsolation(t *testing.T) {
 	if changed.SearchVersion <= primaries.SearchVersion {
 		t.Fatalf("role change did not advance search version: %d to %d", primaries.SearchVersion, changed.SearchVersion)
 	}
-	assertIsolationSearch(t, changed, base, domain.Document{}, false, b)
-	assertIsolationSearch(t, searchRequest(t, api, a.path+"/search?q=isolationmarker", domain.SearchCacheStatusMiss), base, domain.Document{}, false, a)
+	assertIsolationSearch(t, changed, base, nil, false, b)
+	assertIsolationSearch(t, searchRequest(t, api, a.path+"/search?q=isolationmarker", domain.SearchCacheStatusMiss), base, nil, false, a)
 
 	var pendingA, pendingB struct {
 		JobID uuid.UUID `json:"job_id"`
@@ -287,11 +287,12 @@ func TestMultiRepositoryIsolation(t *testing.T) {
 	before := searchRequest(t, api, projectSearch, domain.SearchCacheStatusMiss)
 	searchRequest(t, api, projectSearch, domain.SearchCacheStatusHit)
 	request(t, api, "DELETE", a.path, "", 204, nil)
+	preserved := disassociatedDocument(a.note, a)
 	after := searchRequest(t, api, projectSearch, domain.SearchCacheStatusMiss)
 	if after.SearchVersion <= before.SearchVersion {
 		t.Fatalf("disassociation did not advance search version: %d to %d", before.SearchVersion, after.SearchVersion)
 	}
-	assertIsolationSearch(t, after, base, projectDoc, false, b, c)
+	assertIsolationSearch(t, after, base, []domain.Document{projectDoc, preserved}, false, b, c)
 	assertDisassociatedData(t, f, a.ID)
 	job, err := jobsStore.GetByID(ctx, pendingA.JobID)
 	if err != nil || job.Status != domain.JobCancelled || job.FinishedAt == nil || job.LastErrorCode == nil ||
@@ -307,13 +308,14 @@ func TestMultiRepositoryIsolation(t *testing.T) {
 		t.Fatalf("surviving repository job = %+v %v", job, err)
 	}
 	request(t, api, "GET", a.path+"/search?q=isolationmarker", "", 404, nil)
-	preserved := disassociatedDocument(a.note, a)
 	var kept domain.Document
 	request(t, api, "GET", base+"/documents/"+a.note.ID.String(), "", 200, &kept)
 	if kept.Scope != domain.KnowledgeScopeProject || kept.RepositoryID != nil || !sameOrigin(kept.Origin, preserved.Origin) ||
-		kept.Title != a.note.Title || kept.Version != a.note.Version {
+		kept.Title != preserved.Title || kept.Version != preserved.Version {
 		t.Fatalf("preserved document = %+v, want %+v", kept, preserved)
 	}
+	request(t, api, "PATCH", base+"/documents/"+a.note.ID.String(),
+		fmt.Sprintf(`{"title":"Stale","version":%d}`, a.note.Version), 409, nil)
 	assertRepositoryDocuments(t, api, base, []domain.Document{projectDoc, preserved}, b, c)
 	for _, repo := range []isolationRepository{b, c} {
 		assertIsolatedRepository(t, api, repo, a, commonSHA)
@@ -334,11 +336,13 @@ func TestMultiRepositoryIsolation(t *testing.T) {
 }
 
 // disassociatedDocument is the document a repository-owned note becomes once its
-// repository is disassociated: it survives at project level and keeps the
-// repository as informational origin.
+// repository is disassociated: it survives at project level, keeps the
+// repository as read-only origin, and increments its version so ETags issued
+// against the repository scope go stale.
 func disassociatedDocument(note domain.Document, repo isolationRepository) domain.Document {
 	note.Scope, note.RepositoryID = domain.KnowledgeScopeProject, nil
 	note.Origin = &domain.DocumentOrigin{RepositoryID: repo.ID, RepositoryName: repo.Name}
+	note.Version++
 	return note
 }
 
@@ -498,6 +502,18 @@ func sameOrigin(a, b *domain.DocumentOrigin) bool {
 	return *a == *b
 }
 
+// projectDocuments drops unset documents so callers can pass an optional
+// project-level document without special casing it.
+func projectDocuments(docs ...domain.Document) []domain.Document {
+	out := make([]domain.Document, 0, len(docs))
+	for _, doc := range docs {
+		if doc.ID != uuid.Nil {
+			out = append(out, doc)
+		}
+	}
+	return out
+}
+
 func sameRepositoryID(a, b *uuid.UUID) bool {
 	if a == nil || b == nil {
 		return a == b
@@ -544,7 +560,7 @@ func assertRepositoryDocumentWrites(t *testing.T, api *httptest.Server, local is
 	request(t, api, "GET", notePath, "", 404, nil)
 }
 
-func assertIsolationSearch(t *testing.T, result domain.SearchResult, base string, projectDoc domain.Document, filesOnly bool, repos ...isolationRepository) {
+func assertIsolationSearch(t *testing.T, result domain.SearchResult, base string, projectDocs []domain.Document, filesOnly bool, repos ...isolationRepository) {
 	t.Helper()
 	want := make(map[string]isolationRepository)
 	for _, repo := range repos {
@@ -553,8 +569,10 @@ func assertIsolationSearch(t *testing.T, result domain.SearchResult, base string
 			want[repo.path+"/documents/"+repo.note.ID.String()] = repo
 		}
 	}
-	if projectDoc.ID != uuid.Nil {
-		want[base+"/documents/"+projectDoc.ID.String()] = isolationRepository{note: projectDoc}
+	if len(projectDocs) != 0 {
+		for _, doc := range projectDocs {
+			want[base+"/documents/"+doc.ID.String()] = isolationRepository{note: doc}
+		}
 	}
 	if result.Total != int64(len(want)) || len(result.Items) != len(want) {
 		t.Fatalf("search returned %d hits (%d total), want %d: %+v", len(result.Items), result.Total, len(want), result.Items)

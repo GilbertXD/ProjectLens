@@ -119,7 +119,7 @@ With `TEST_DATABASE_URL` set, the search integration tests use an in-process Red
 
 Markdown documents are owned by the project or by one of its repositories. At `/api/v1/projects/{projectId}/documents`, omit `repository_id` on create for a project-level document, or supply it for a repository-owned document. The response reports `scope` as `project` or `repository`.
 
-Documents are user-authored notes, so disassociating a repository never deletes them. A repository-owned document becomes a project-level document and reports `scope` as `project` with an `origin` object holding `repository_id` and `repository_name`. Provenance is informational only: it never grants repository scope. PUT replaces it (omitting `origin` clears it) and PATCH sets it, clears it with `null`, or leaves it unchanged when omitted.
+Documents are user-authored notes, so disassociating a repository never deletes them. A repository-owned document becomes a project-level document and reports `scope` as `project` with an `origin` object holding `repository_id` and `repository_name`. Provenance is service-maintained and read-only: document writes reject `origin`, and disassociation increments `version` and refreshes `updated_at`, so ETags issued against the repository scope go stale and return `409 version_conflict` on retry.
 
 The project list includes both scopes by default. Filter with `scope=project`, `scope=repository`, or `repository_id=<uuid>`. A repository ID is incompatible with `scope=project`. Use `/api/v1/projects/{projectId}/repositories/{repoId}/documents` as the base path to create, list, read, update, and delete documents owned by one repository. The repository is taken from the path on create. Requests for repositories or documents outside the specified scope return `404`.
 
@@ -128,8 +128,8 @@ The project list includes both scopes by default. Filter with `scope=project`, `
 | POST | (base) | Create with `title` and optional `content`. Returns `201`. |
 | GET | (base) | List summaries without full content. Returns `200`. |
 | GET | `/{docId}` | Read the full document. Returns `200`. |
-| PUT | `/{docId}` | Replace the title, content, and `origin`. Omitted content becomes empty and omitted `origin` is cleared. Returns `200`. |
-| PATCH | `/{docId}` | Change `title`, `content`, and `origin`, or any combination. Send `"origin": null` to clear provenance. Returns `200`. |
+| PUT | `/{docId}` | Replace the title and content. Omitted content becomes empty. Provenance is service-maintained and unchanged. Returns `200`. |
+| PATCH | `/{docId}` | Change `title`, `content`, or both. Provenance is service-maintained and unchanged. Returns `200`. |
 | DELETE | `/{docId}` | Delete the document. Accepts an optional `If-Match`. Returns `204`. |
 
 Lists are ordered by most recently updated, then by descending document ID. Use `limit` (default 20, maximum 100) and `offset` (default 0). The response includes `items`, `total`, `limit`, and `offset`. Requests for documents outside the specified project return `404`.
@@ -159,7 +159,7 @@ A project can associate local Git working trees and public GitHub repositories. 
 | POST | `/repositories/:repoId/refresh-metadata` | Refresh source metadata and set `last_synced_at`, preserving the name and description |
 | DELETE | `/repositories/:repoId` | Remove the association and return 204 |
 
-Disassociation deletes that repository’s snapshots, files, history, GitHub activity, and sync policies. Pending jobs for the repository are cancelled and running jobs receive a cancellation request. The project’s search cache is invalidated. Documents survive as project-level documents that keep the repository under `origin`, and data owned by other repositories is preserved.
+Disassociation deletes that repository’s snapshots, files, history, GitHub activity, and sync policies. Pending jobs for the repository are cancelled and running jobs receive a cancellation request. The project’s search cache is invalidated. Documents survive as project-level documents that record the repository under the read-only `origin` field, gain a new `version`, and data owned by other repositories is preserved.
 
 POST takes a `source_type` of `local_git` or `github`, a `source`, and optional `name`, `description`, and `role`. For GitHub, use a public repository URL such as `https://github.com/owner/repo`. For local Git, use an absolute path to the root of a readable working tree. The server needs Git installed and access to the path. In Docker Compose, bind-mount the repositories and set the allowed roots to their paths inside the container. Local associations are forbidden by default.
 

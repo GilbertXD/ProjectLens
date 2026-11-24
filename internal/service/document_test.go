@@ -42,11 +42,11 @@ func (s *testDocumentStore) ListByProject(_ context.Context, _ uuid.UUID, f doma
 	return domain.DocumentListResult{Limit: f.Limit, Offset: f.Offset}, nil
 }
 
-func (s *testDocumentStore) Update(ctx context.Context, projectID, docID uuid.UUID, repositoryID *uuid.UUID, version int64, title, content string, origin domain.OriginPatch) (domain.Document, error) {
-	return s.Patch(ctx, projectID, docID, repositoryID, version, &title, &content, origin)
+func (s *testDocumentStore) Update(ctx context.Context, projectID, docID uuid.UUID, repositoryID *uuid.UUID, version int64, title, content string) (domain.Document, error) {
+	return s.Patch(ctx, projectID, docID, repositoryID, version, &title, &content)
 }
 
-func (s *testDocumentStore) Patch(ctx context.Context, projectID, docID uuid.UUID, repositoryID *uuid.UUID, version int64, title, content *string, origin domain.OriginPatch) (domain.Document, error) {
+func (s *testDocumentStore) Patch(ctx context.Context, projectID, docID uuid.UUID, repositoryID *uuid.UUID, version int64, title, content *string) (domain.Document, error) {
 	doc, err := s.GetScopedByID(ctx, projectID, docID, repositoryID)
 	if err != nil {
 		return doc, err
@@ -59,12 +59,6 @@ func (s *testDocumentStore) Patch(ctx context.Context, projectID, docID uuid.UUI
 	}
 	if content != nil {
 		doc.Content = *content
-	}
-	if origin.Origin != nil {
-		doc.Origin = origin.Origin
-	}
-	if origin.Clear {
-		doc.Origin = nil
 	}
 	doc.Version++
 	s.doc = doc
@@ -174,47 +168,6 @@ func TestDocumentServiceScopingAndVersions(t *testing.T) {
 	got, err := s.Patch(ctx, p, id, nil, domain.PatchDocumentInput{Title: &title, Version: 1})
 	if err != nil || got.Title != "Revised" || got.Content != doc.Content || got.Version != 2 {
 		t.Fatalf("patch = %+v, %v", got, err)
-	}
-}
-
-func TestDocumentServiceOrigin(t *testing.T) {
-	project := uuid.New()
-	s := NewDocumentService(documentProjects{project: true}, &testDocumentStore{}, 0)
-	ctx, p := t.Context(), project.String()
-	doc, err := s.Create(ctx, p, domain.CreateDocumentInput{Title: "Note"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	repo := uuid.New()
-	for _, tc := range []struct {
-		name   string
-		origin *domain.DocumentOrigin
-		want   error
-	}{
-		{name: "trimmed", origin: &domain.DocumentOrigin{RepositoryID: repo, RepositoryName: " Former "}},
-		{name: "nil id", origin: &domain.DocumentOrigin{RepositoryName: "Former"}, want: domain.ErrInvalidInput},
-		{name: "blank name", origin: &domain.DocumentOrigin{RepositoryID: repo, RepositoryName: " \t"}, want: domain.ErrInvalidInput},
-		{name: "long name", origin: &domain.DocumentOrigin{RepositoryID: repo, RepositoryName: strings.Repeat("界", 201)}, want: domain.ErrInvalidInput},
-		{name: "NUL name", origin: &domain.DocumentOrigin{RepositoryID: repo, RepositoryName: "For\x00mer"}, want: domain.ErrInvalidInput},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := s.Patch(ctx, p, doc.ID.String(), nil, domain.PatchDocumentInput{Origin: tc.origin, Version: doc.Version})
-			if tc.want != nil {
-				if !errors.Is(err, tc.want) {
-					t.Fatalf("patch origin = %v, want %v", err, tc.want)
-				}
-				return
-			}
-			if err != nil || got.Origin == nil || *got.Origin != (domain.DocumentOrigin{RepositoryID: repo, RepositoryName: "Former"}) ||
-				got.Scope != domain.KnowledgeScopeProject || got.RepositoryID != nil {
-				t.Fatalf("patch origin = %+v, %v", got, err)
-			}
-			doc = got
-		})
-	}
-	cleared, err := s.Patch(ctx, p, doc.ID.String(), nil, domain.PatchDocumentInput{ClearOrigin: true, Version: doc.Version})
-	if err != nil || cleared.Origin != nil {
-		t.Fatalf("clear origin = %+v, %v", cleared, err)
 	}
 }
 
