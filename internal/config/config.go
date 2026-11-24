@@ -309,22 +309,27 @@ type ScheduleConfig struct {
 	MinIntervalSeconds int `yaml:"min_interval_seconds"`
 	Batch              int `yaml:"batch"`
 }
+type ObservabilityConfig struct {
+	MetricsAddr string `yaml:"metrics_addr"`
+	Trace       bool   `yaml:"trace"`
+}
 type Config struct {
-	Schedule   ScheduleConfig   `yaml:"schedule"`
-	Auth       AuthConfig       `yaml:"auth"`
-	Redis      RedisConfig      `yaml:"redis"`
-	Search     SearchConfig     `yaml:"search"`
-	Document   DocumentConfig   `yaml:"document"`
-	Sync       SyncConfig       `yaml:"sync"`
-	Scanner    ScannerConfig    `yaml:"scanner"`
-	Worker     WorkerConfig     `yaml:"worker"`
-	Repository RepositoryConfig `yaml:"repository"`
-	GitHub     GitHubConfig     `yaml:"github"`
-	Database   DatabaseConfig   `yaml:"database"`
-	App        AppConfig        `yaml:"app"`
-	Server     ServerConfig     `yaml:"server"`
-	Log        LogConfig        `yaml:"log"`
-	CORS       CORSConfig       `yaml:"cors"`
+	Observability ObservabilityConfig `yaml:"observability"`
+	Schedule      ScheduleConfig      `yaml:"schedule"`
+	Auth          AuthConfig          `yaml:"auth"`
+	Redis         RedisConfig         `yaml:"redis"`
+	Search        SearchConfig        `yaml:"search"`
+	Document      DocumentConfig      `yaml:"document"`
+	Sync          SyncConfig          `yaml:"sync"`
+	Scanner       ScannerConfig       `yaml:"scanner"`
+	Worker        WorkerConfig        `yaml:"worker"`
+	Repository    RepositoryConfig    `yaml:"repository"`
+	GitHub        GitHubConfig        `yaml:"github"`
+	Database      DatabaseConfig      `yaml:"database"`
+	App           AppConfig           `yaml:"app"`
+	Server        ServerConfig        `yaml:"server"`
+	Log           LogConfig           `yaml:"log"`
+	CORS          CORSConfig          `yaml:"cors"`
 }
 
 type WorkerConfig struct {
@@ -577,6 +582,7 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		{"GITHUB_USER_AGENT", &cfg.GitHub.UserAgent},
 		{"APP_NAME", &cfg.App.Name},
 		{"DATABASE_URL", &cfg.Database.DSN},
+		{"METRICS_ADDR", &cfg.Observability.MetricsAddr},
 		{"APP_ENV", &cfg.App.Env},
 		{"APP_VERSION", &cfg.App.Version},
 		{"SERVER_HOST", &cfg.Server.Host},
@@ -636,6 +642,7 @@ func (cfg *Config) applyEnv(lookupEnv func(string) (string, bool)) error {
 		{"AUTH_ENABLED", &cfg.Auth.Enabled},
 		{"DB_AUTO_MIGRATE", &cfg.Database.AutoMigrate},
 		{"WORKER_ENABLE_MOCK_JOBS", &cfg.Worker.EnableMockJobs},
+		{"TRACE_ENABLED", &cfg.Observability.Trace},
 		{"REDIS_ENABLED", &cfg.Redis.Enabled},
 	} {
 		if value, ok := lookupEnv(field.name); ok {

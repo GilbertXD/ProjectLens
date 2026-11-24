@@ -22,6 +22,7 @@ import (
 	"projectlens/internal/router"
 	"projectlens/internal/server"
 	"projectlens/internal/service"
+	"projectlens/internal/telemetry"
 	"projectlens/internal/worker"
 )
 
@@ -75,6 +76,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer pool.Close()
+	defer telemetry.StartTracing(cfg.Observability.Trace, log)()
+	closeMetrics, err := telemetry.StartMetrics(cfg.Observability.MetricsAddr, pool, log)
+	if err != nil {
+		log.Error("initialize metrics", "error", err)
+		return 1
+	}
+	defer closeMetrics()
 	if cfg.Database.AutoMigrate {
 		if err := db.MigrateUp(ctx, pool); err != nil {
 			log.Error("migrate database failed")

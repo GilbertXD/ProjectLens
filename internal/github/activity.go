@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"projectlens/internal/domain"
+	"projectlens/internal/telemetry"
 )
 
 type Activity struct {
@@ -119,6 +120,7 @@ func activityStatus(res *http.Response) error {
 		if sec, e := strconv.ParseInt(res.Header.Get("X-RateLimit-Reset"), 10, 64); e == nil {
 			delay = max(delay, time.Until(time.Unix(sec, 0)))
 		}
+		telemetry.Wait.WithLabelValues().Observe(delay.Seconds())
 		return &RetryError{Delay: delay}
 	case res.StatusCode == 403 || res.StatusCode == 401:
 		return domain.ErrForbidden

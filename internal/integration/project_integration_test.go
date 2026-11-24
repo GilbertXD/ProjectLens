@@ -140,6 +140,39 @@ func TestProjectLifecycle(t *testing.T) {
 	if err := db.MigrateUp(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
+	for _, object := range []string{"trace_parent", "sync_policies", "github_activity", "repository_commits", "jobs_active_sync_target"} {
+		if err := db.MigrateDown(ctx, pool); err != nil {
+			t.Fatal(err)
+		}
+		var remains bool
+		if object == "trace_parent" {
+			if err := pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='jobs' AND column_name=$1)", object).Scan(&remains); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := pool.QueryRow(ctx, "SELECT to_regclass($1) IS NOT NULL", object).Scan(&remains); err != nil {
+			t.Fatal(err)
+		}
+		if remains {
+			t.Fatal("rollback left", object)
+		}
+	}
+	// Exercise an upgrade from a populated v1 schema before testing its older rollbacks.
+	var legacyID uuid.UUID
+	if err := pool.QueryRow(ctx, "INSERT INTO projects(id,slug,name,description,status) VALUES(gen_random_uuid(),'legacy','Legacy','','active') RETURNING id").Scan(&legacyID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MigrateUp(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	var preserved string
+	if err := pool.QueryRow(ctx, "SELECT name FROM projects WHERE id=$1", legacyID).Scan(&preserved); err != nil || preserved != "Legacy" {
+		t.Fatal(preserved, err)
+	}
+	for range 5 {
+		if err := db.MigrateDown(ctx, pool); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := db.MigrateDown(ctx, pool); err != nil {
 		t.Fatalf("migrate unified search down: %v", err)
 	}

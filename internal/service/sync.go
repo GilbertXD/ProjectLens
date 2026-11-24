@@ -17,6 +17,7 @@ import (
 	"projectlens/internal/domain"
 	"projectlens/internal/gitscan"
 	"projectlens/internal/repository"
+	"projectlens/internal/telemetry"
 )
 
 type syncRepositoryLookup interface {
@@ -57,6 +58,10 @@ func NewSyncService(repos syncRepositoryLookup, store snapshotStore, tx db.TxMan
 }
 
 func (s *SyncService) SyncRepository(ctx context.Context, projectID, repoID uuid.UUID, ref string, jobID *uuid.UUID) (domain.SyncResult, error) {
+	ctx, span := telemetry.Span(ctx, "snapshot.sync")
+	defer span.End()
+	start := time.Now()
+	defer func() { telemetry.Sync.WithLabelValues().Observe(time.Since(start).Seconds()) }()
 	if projectID == uuid.Nil || repoID == uuid.Nil {
 		return domain.SyncResult{}, fmt.Errorf("%w: project_id and repository_id are required", domain.ErrInvalidInput)
 	}
@@ -103,13 +108,17 @@ func (s *SyncService) SyncRepository(ctx context.Context, projectID, repoID uuid
 			parentID := active.ID
 			req.ExpectedParentSnapshotID = &parentID
 		}
-		active, err = s.store.PublishSnapshot(ctx, s.tx, req)
+		publishCtx, publishSpan := telemetry.Span(ctx, "snapshot.publish")
+		active, err = s.store.PublishSnapshot(publishCtx, s.tx, req)
+		publishSpan.End()
 		if err != nil {
 			return domain.SyncResult{}, err
 		}
 		status = domain.SyncOutcomePublished
 	}
 
+	telemetry.Files.Add(float64(scan.Stats.IncludedFiles))
+	telemetry.Bytes.Add(float64(scan.Stats.IncludedBytes))
 	pruned, err := s.store.PruneSnapshots(ctx, repoID, s.cfg.RetainSuperseded, time.Now().UTC().Add(-s.cfg.FailedRetention))
 	if err != nil {
 		s.log.WarnContext(ctx, "prune repository snapshots", "repository_id", repoID, "error", err)

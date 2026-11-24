@@ -10,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"projectlens/internal/telemetry"
 )
 
 type gitRunner struct {
@@ -92,6 +94,8 @@ func (e *gitError) Unwrap() error { return e.err }
 var errOutputLimit = errors.New("Git output exceeded the scanner limit")
 
 func (g gitRunner) run(ctx context.Context, limit int, auth bool, args ...string) ([]byte, error) {
+	ctx, span := telemetry.Span(ctx, "git.command")
+	defer span.End()
 	cmd := g.command(ctx, auth, args...)
 	stdout := &boundedOutput{limit: limit}
 	stderr := &boundedOutput{limit: 8192}

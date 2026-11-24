@@ -14,6 +14,7 @@ import (
 
 	"projectlens/internal/config"
 	"projectlens/internal/domain"
+	"projectlens/internal/telemetry"
 )
 
 type Store interface {
@@ -86,6 +87,9 @@ func (r *Runner) sweep(ctx context.Context) {
 	for ctx.Err() == nil {
 		const batch = 100
 		count, err := r.store.ReclaimExpiredLeases(ctx, batch, r.cfg.RetryBaseDelay)
+		if err == nil && count > 0 {
+			telemetry.Expiries.Add(float64(count))
+		}
 		if err != nil && ctx.Err() == nil {
 			r.log.Error("reclaim expired jobs", "worker_id", r.id, "error", err)
 		}
@@ -166,7 +170,22 @@ func (r *Runner) execute(active context.Context, job domain.Job, token uuid.UUID
 	heartbeatCtx, stopHeartbeat := context.WithCancel(active)
 	outcome := make(chan heartbeatOutcome, 1)
 	go func() { outcome <- r.heartbeat(heartbeatCtx, cancelJob, job.ID, token) }()
+	jobCtx, span := telemetry.Span(telemetry.Restore(jobCtx, job.TraceParent), "worker.execute")
+	defer span.End()
+	start := time.Now()
+	if job.Attempt > 1 {
+		telemetry.Retries.Inc()
+	}
 	result, handlerErr := r.invoke(jobCtx, job)
+	outcomeLabel := "success"
+	if handlerErr != nil {
+		outcomeLabel = "error"
+	}
+	if jobCtx.Err() != nil {
+		outcomeLabel = "interrupted"
+	}
+	telemetry.Jobs.WithLabelValues(telemetry.JobKind(job.Type), outcomeLabel).Observe(time.Since(start).Seconds())
+	r.log.InfoContext(jobCtx, "job attempt finished", "job_id", job.ID, "trace_id", telemetry.TraceID(jobCtx), "outcome", outcomeLabel, "attempt", job.Attempt)
 	jobErr := jobCtx.Err()
 	stopHeartbeat()
 	heartbeat := <-outcome

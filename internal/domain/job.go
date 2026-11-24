@@ -18,6 +18,7 @@ const (
 )
 
 type Job struct {
+	TraceParent       string          `json:"-"`
 	ID                uuid.UUID       `json:"id"`
 	Type              string          `json:"type"`
 	Status            JobStatus       `json:"status"`

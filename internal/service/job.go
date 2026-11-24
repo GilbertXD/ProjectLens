@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"projectlens/internal/gitscan"
 	"reflect"
 	"regexp"
 	"strings"
@@ -18,6 +17,8 @@ import (
 
 	"projectlens/internal/config"
 	"projectlens/internal/domain"
+	"projectlens/internal/gitscan"
+	"projectlens/internal/telemetry"
 )
 
 type JobStore interface {
@@ -44,6 +45,8 @@ func NewJobService(store JobStore, types JobTypeValidator, cfg config.WorkerConf
 var jobTypePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]{0,119}$`)
 
 func (s *JobService) Enqueue(ctx context.Context, input domain.CreateJobInput) (domain.Job, bool, error) {
+	ctx, span := telemetry.Span(ctx, "job.enqueue")
+	defer span.End()
 	var empty domain.Job
 	if !jobTypePattern.MatchString(input.Type) || !s.types.Has(input.Type) {
 		return empty, false, fmt.Errorf("%w: type must be a registered job type", domain.ErrInvalidInput)

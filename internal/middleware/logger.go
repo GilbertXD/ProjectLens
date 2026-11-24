@@ -7,14 +7,20 @@ import (
 	"unicode"
 
 	"github.com/gin-gonic/gin"
+
+	"projectlens/internal/telemetry"
 )
 
 func Logger(log *slog.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		ctx, span := telemetry.Span(c.Request.Context(), "http.request")
+		defer span.End()
+		c.Request = c.Request.WithContext(ctx)
 		start := time.Now()
 		c.Next()
 
 		status := c.Writer.Status()
+		telemetry.HTTP.WithLabelValues(telemetry.StatusClass(status)).Observe(time.Since(start).Seconds())
 		level := slog.LevelInfo
 		switch {
 		case status >= 500:
@@ -27,6 +33,7 @@ func Logger(log *slog.Logger) gin.HandlerFunc {
 			auth = "disabled"
 		}
 		log.LogAttrs(c.Request.Context(), level, "http request",
+			slog.String("trace_id", telemetry.TraceID(ctx)),
 			slog.String("request_id", GetRequestID(c)),
 			slog.String("method", c.Request.Method),
 			slog.String("path", c.Request.URL.Path),

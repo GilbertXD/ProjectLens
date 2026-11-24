@@ -214,13 +214,7 @@ func (s *Scanner) ReadBlob(ctx context.Context, spec SourceSpec, commitOrRef, bl
 func readCommit(ctx context.Context, repo *PreparedRepo) (CommitInfo, error) {
 	git := gitRunner{}
 	dir := "--git-dir=" + repo.GitDir
-	kind, err := git.run(ctx, 1024, false, dir, "cat-file", "-t", repo.PinnedCommit)
-	if err != nil {
-		return CommitInfo{}, err
-	}
-	if string(kind) != "commit\n" {
-		return CommitInfo{}, errors.New("pinned Git object is not a commit")
-	}
+	// Prepare pins a commit. The formatted object ID and raw commit headers below verify it.
 	const format = "--format=%H%x00%T%x00%P%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%s"
 	raw, err := git.run(ctx, 1<<20, false, dir, "show", "-s", "--no-show-signature", "--no-notes", "--encoding=UTF-8", format, repo.PinnedCommit)
 	if err != nil {

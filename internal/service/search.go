@@ -16,6 +16,7 @@ import (
 
 	"projectlens/internal/config"
 	"projectlens/internal/domain"
+	"projectlens/internal/telemetry"
 )
 
 type SearchStore interface {
@@ -43,7 +44,17 @@ func NewSearchService(store SearchStore, cache SearchCache, cfg config.SearchCon
 	return &SearchService{store: store, cache: cache, cfg: cfg, keyPrefix: keyPrefix, log: log}
 }
 
-func (s *SearchService) Search(ctx context.Context, rawProjectID string, filter domain.SearchFilter) (domain.SearchResult, error) {
+func (s *SearchService) Search(ctx context.Context, rawProjectID string, filter domain.SearchFilter) (out domain.SearchResult, retErr error) {
+	start := time.Now()
+	ctx, span := telemetry.Span(ctx, "search")
+	defer span.End()
+	defer func() {
+		label := "error"
+		if retErr == nil {
+			label = string(out.CacheStatus)
+		}
+		telemetry.Search.WithLabelValues(label).Observe(time.Since(start).Seconds())
+	}()
 	projectID, err := parseID(rawProjectID)
 	if err != nil {
 		return domain.SearchResult{}, err

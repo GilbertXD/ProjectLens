@@ -68,7 +68,16 @@ import (
 func main() {
     server := &http.Server{
         Addr: ":8000",
-        Handler: http.FileServer(http.Dir("/fixtures/web")),
+        Handler: http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
+            switch r.URL.Path {
+            case "/repos/owner/project/issues":
+                w.Write([]byte(`[{"id":123,"number":1,"state":"open","title":"Fixture issue","created_at":"2020-01-01T00:00:00Z","updated_at":"2020-01-01T00:00:00Z","html_url":"https://github.com/owner/project/issues/1"}]`))
+            case "/repos/owner/project/issues/comments","/repos/owner/project/pulls/comments":
+                w.Write([]byte("[]"))
+            default:
+                http.FileServer(http.Dir("/fixtures/web")).ServeHTTP(w,r)
+            }
+        }),
         ReadHeaderTimeout: 5 * time.Second,
     }
     log.Fatal(server.ListenAndServe())
@@ -85,6 +94,8 @@ services:
     depends_on:
       github-fixture:
         condition: service_healthy
+  worker:
+    image: "${E2E_IMAGE}"
   github-fixture:
     build: "${E2E_FIXTURE_BUILD_DIR}"
     volumes:
@@ -124,7 +135,7 @@ cleanup() {
       sed "s/$token/[REDACTED]/g" "$scratch/failure.log" >&2
     fi
   fi
-  compose down -v --remove-orphans --rmi local || status=1
+  compose --profile worker down -v --remove-orphans --rmi local || status=1
   if docker image inspect "$image" >/dev/null 2>&1; then
     docker image rm "$image" >/dev/null || status=1
   fi
@@ -214,6 +225,11 @@ enqueue_and_wait() {
   local job status attempt
   request 202 POST /api/v1/jobs yes "$1"
   job="$(jq -er '.id' "$body")"
+  wait_job "$job"
+}
+
+wait_job() {
+  local job="$1" status attempt
   for ((attempt = 0; attempt < 120; attempt++)); do
     request 200 GET "/api/v1/jobs/$job" yes
     status="$(jq -er '.status' "$body")"
@@ -235,9 +251,25 @@ import_and_sync() {
   request 201 POST "$project_api/repositories" yes \
     "$(jq -nc --arg kind "$kind" --arg source "$source" '{source_type:$kind,source:$source}')"
   repo="$(jq -er '.id' "$body")"
-  enqueue_and_wait "$(jq -nc --arg project "$project_id" --arg repo "$repo" \
-    '{type:"repository.sync",payload:{project_id:$project,repository_id:$repo,ref:"main"}}')"
+  request 202 POST "$project_api/repositories/$repo/sync" yes '{"ref":"main"}'
+  wait_job "$(jq -er '.job_id' "$body")"
   commit="$(jq -er '.result | select(.status == "published") | .commit_hash' "$body")"
+  local scoped="$project_api/repositories/$repo"
+  request 202 POST "$scoped/commits/sync" yes '{"ref":"main"}'
+  wait_job "$(jq -er '.job_id' "$body")"
+  request 200 GET "$scoped/commits?ref=main" yes
+  jq -e --arg sha "$commit" '.tip==$sha and .items[0].hash==$sha' "$body" >/dev/null
+  request 200 GET "$scoped/commits/$commit/files" yes
+  jq -e '.items[0].type=="A"' "$body" >/dev/null
+  request 200 GET "$scoped/compare?base=$commit&head=$commit" yes
+  jq -e '.total==0' "$body" >/dev/null
+  request 200 PUT "$scoped/sync-policy/commits" yes '{"enabled":false,"interval_seconds":120}'
+  if [[ "$kind" == github ]]; then
+    request 202 POST "$scoped/github-activity/sync" yes
+    wait_job "$(jq -er '.job_id' "$body")"
+    request 200 GET "$scoped/issues/1" yes
+    jq -e '.title=="Fixture issue" and .id==123' "$body" >/dev/null
+  fi
   request 200 GET "$project_api/search?q=deliveryquasar&source_type=$kind" yes
   jq -e --arg kind "$kind" --arg repo "$repo" --arg commit "$commit" \
     '.total == 1 and (.items[0] | .source_type == $kind and .location.repository_id == $repo and .location.commit_hash == $commit)' "$body" >/dev/null
@@ -285,6 +317,24 @@ request 200 GET "$project_api" yes
 jq -e --arg id "$project_id" '.id == $id and .slug == "delivery"' "$body" >/dev/null
 search_cache hit 3
 
+# Keep a legacy mock pending, then let the production standalone worker claim it.
+WORKER_MODE=external compose up -d --no-build --no-deps api
+refresh_api_url
+wait_ready ok
+request 202 POST /api/v1/jobs yes '{"type":"mock.echo"}'
+legacy_job="$(jq -er '.id' "$body")"
+APP_ENV=production WORKER_MODE=external WORKER_ENABLE_MOCK_JOBS=true compose --profile worker up -d --no-deps api worker
+refresh_api_url
+wait_ready ok
+for kind in mock.echo mock.fail mock.sleep mock.flaky; do
+  request 400 POST /api/v1/jobs yes "$(jq -nc --arg kind "$kind" '{type:$kind}')"
+done
+for ((i=0;i<100;i++)); do
+  request 200 GET "/api/v1/jobs/$legacy_job" yes
+  if jq -e '.status=="failed"' "$body" >/dev/null; then break; fi
+  sleep 0.2
+done
+jq -e '.last_error_code=="unknown_job_type" and .attempt==1' "$body" >/dev/null
 compose logs --no-color > "$scratch/logs"
 if grep -Fq "$token" "$scratch/logs"; then
   echo "Bearer token leaked in container logs" >&2

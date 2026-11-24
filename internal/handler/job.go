@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"projectlens/internal/domain"
+	"projectlens/internal/telemetry"
 )
 
 type JobService interface {
@@ -95,6 +96,7 @@ func (h *JobHandler) syncRepository(kind string) gin.HandlerFunc {
 			return
 		}
 		url := "/api/v1/jobs/" + job.ID.String()
+		h.log.InfoContext(c.Request.Context(), "repository sync requested", "request_id", c.Writer.Header().Get("X-Request-ID"), "job_id", job.ID, "trace_id", telemetry.TraceID(c.Request.Context()))
 		c.Header("Location", url)
 		status := http.StatusOK
 		if created {
@@ -102,8 +104,8 @@ func (h *JobHandler) syncRepository(kind string) gin.HandlerFunc {
 		}
 		c.JSON(status, gin.H{"job_id": job.ID, "status": job.Status, "poll_url": url})
 	}
-
 }
+
 func (h *JobHandler) list(c *gin.Context) {
 	filter := domain.ListJobsFilter{Status: domain.JobStatus(c.Query("status")), Type: c.Query("type")}
 	for _, name := range []string{"status", "type"} {

@@ -5,7 +5,9 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
 	"projectlens/internal/config"
+	"projectlens/internal/telemetry"
 )
 
 func NewPool(ctx context.Context, cfg config.DatabaseConfig) (*pgxpool.Pool, error) {
@@ -13,6 +15,7 @@ func NewPool(ctx context.Context, cfg config.DatabaseConfig) (*pgxpool.Pool, err
 	if err != nil {
 		return nil, fmt.Errorf("invalid PostgreSQL connection configuration")
 	}
+	settings.ConnConfig.Tracer = telemetry.QueryTracer{}
 	settings.MaxConns = cfg.MaxConns
 	settings.MinConns = cfg.MinConns
 	settings.MaxConnLifetime = cfg.MaxConnLifetime

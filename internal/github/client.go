@@ -9,9 +9,11 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"projectlens/internal/config"
 	"projectlens/internal/domain"
+	"projectlens/internal/telemetry"
 )
 
 type Metadata struct {
@@ -40,9 +42,28 @@ func NewClient(cfg config.GitHubConfig, client *http.Client) *Client {
 	if cfg.Timeout > 0 {
 		configured.Timeout = cfg.Timeout
 	}
+	transport := configured.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	configured.Transport = observedTransport{transport}
 	return &Client{config: cfg, http: &configured}
 }
 
+type observedTransport struct{ next http.RoundTripper }
+
+func (t observedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	ctx, span := telemetry.Span(req.Context(), "github.request")
+	defer span.End()
+	start := time.Now()
+	res, err := t.next.RoundTrip(req.WithContext(ctx))
+	status := 0
+	if res != nil {
+		status = res.StatusCode
+	}
+	telemetry.GitHub.WithLabelValues(telemetry.StatusClass(status)).Observe(time.Since(start).Seconds())
+	return res, err
+}
 func (c *Client) Fetch(ctx context.Context, owner, repo string) (Metadata, error) {
 	return c.fetch(ctx, owner, repo, false)
 }

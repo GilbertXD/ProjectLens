@@ -16,6 +16,7 @@ import (
 
 	"projectlens/internal/db"
 	"projectlens/internal/domain"
+	"projectlens/internal/telemetry"
 )
 
 type PostgresJobStore struct{ pool *pgxpool.Pool }
@@ -24,13 +25,13 @@ func NewPostgresJobStore(pool *pgxpool.Pool) *PostgresJobStore {
 	return &PostgresJobStore{pool: pool}
 }
 
-const jobColumns = "id, type, status, payload, result, idempotency_key, attempt, max_attempts, timeout_seconds, run_at, locked_by, lease_token, lease_until, cancel_requested_at, last_error, last_error_code, started_at, finished_at, created_at, updated_at"
+const jobColumns = "id, type, status, payload, result, idempotency_key, attempt, max_attempts, timeout_seconds, run_at, locked_by, lease_token, lease_until, cancel_requested_at, last_error, last_error_code, started_at, finished_at, created_at, updated_at,trace_parent"
 
 func jobDestinations(job *domain.Job) []any {
 	return []any{&job.ID, &job.Type, &job.Status, &job.Payload, &job.Result, &job.IdempotencyKey,
 		&job.Attempt, &job.MaxAttempts, &job.TimeoutSeconds, &job.RunAt, &job.LockedBy, &job.LeaseToken,
 		&job.LeaseUntil, &job.CancelRequestedAt, &job.LastError, &job.LastErrorCode, &job.StartedAt,
-		&job.FinishedAt, &job.CreatedAt, &job.UpdatedAt}
+		&job.FinishedAt, &job.CreatedAt, &job.UpdatedAt, &job.TraceParent}
 }
 
 func scanJob(row pgx.Row) (domain.Job, error) {
@@ -48,10 +49,10 @@ func (s *PostgresJobStore) Create(ctx context.Context, job domain.Job) (domain.J
 		runAt = &job.RunAt
 	}
 	created, err := scanJob(db.ConnFromContext(ctx, s.pool).QueryRow(ctx, `
-        INSERT INTO jobs (id, type, status, payload, idempotency_key, max_attempts, timeout_seconds, run_at)
-        VALUES ($1, $2, 'pending', $3, $4, $5, $6, COALESCE($7, NOW()))
+        INSERT INTO jobs (id, type, status, payload, idempotency_key, max_attempts, timeout_seconds, run_at,trace_parent)
+        VALUES ($1, $2, 'pending', $3, $4, $5, $6, COALESCE($7, NOW()),$8)
         ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
-        RETURNING `+jobColumns, job.ID, job.Type, job.Payload, job.IdempotencyKey, job.MaxAttempts, job.TimeoutSeconds, runAt))
+        RETURNING `+jobColumns, job.ID, job.Type, job.Payload, job.IdempotencyKey, job.MaxAttempts, job.TimeoutSeconds, runAt, telemetry.TraceParent(ctx)))
 	if errors.Is(err, domain.ErrNotFound) {
 		return created, domain.ErrDuplicateJobKey
 	}
