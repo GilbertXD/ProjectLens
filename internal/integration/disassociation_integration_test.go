@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"projectlens/internal/domain"
 	"projectlens/internal/repository"
 	"projectlens/internal/service"
+	"projectlens/internal/worker"
 )
 
 // disassociationFixture creates a project, one local Git repository row, and one
@@ -52,7 +54,8 @@ func disassociationFixture(t *testing.T) (*pgxpool.Pool, uuid.UUID, uuid.UUID, u
 // behind it and still record provenance for the document created mid-flight.
 func TestDisassociationKeepsConcurrentDocumentProvenance(t *testing.T) {
 	pool, projectID, repoID, docID := disassociationFixture(t)
-	ctx := t.Context()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
 
 	concurrent, err := pool.Begin(ctx)
 	if err != nil {
@@ -67,10 +70,10 @@ func TestDisassociationKeepsConcurrentDocumentProvenance(t *testing.T) {
 
 	deleted := make(chan error, 1)
 	go func() {
-		deleted <- repository.NewPostgresRepositoryStore(pool).Delete(context.Background(), projectID, repoID)
+		deleted <- repository.NewPostgresRepositoryStore(pool).Delete(ctx, projectID, repoID)
 	}()
 
-	waitForDisassociationWaiting(t, pool)
+	waitForDisassociationWaiting(t, ctx, pool, concurrent.Conn().PgConn().PID())
 	if err := concurrent.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -97,24 +100,26 @@ func TestDisassociationKeepsConcurrentDocumentProvenance(t *testing.T) {
 // waitForDisassociationWaiting blocks until the disassociation transaction is
 // waiting on a lock held by the concurrent document transaction. This keeps the
 // test deterministic instead of racing on a sleep.
-func waitForDisassociationWaiting(t *testing.T, pool *pgxpool.Pool) {
+func waitForDisassociationWaiting(t *testing.T, ctx context.Context, pool *pgxpool.Pool, blockerPID uint32) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		var waiting int
-		if err := pool.QueryRow(t.Context(), `SELECT count(*) FROM pg_locks l
-			JOIN pg_class c ON c.oid = l.relation
-			JOIN pg_namespace n ON n.oid = c.relnamespace
-			WHERE NOT l.granted AND n.nspname = current_schema()
-				AND c.relname IN ('repositories', 'documents')`).Scan(&waiting); err != nil {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var waiting bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM pg_stat_activity
+			WHERE $1::integer = ANY(pg_blocking_pids(pid)))`, int32(blockerPID)).Scan(&waiting); err != nil {
 			t.Fatalf("inspect locks: %v", err)
 		}
-		if waiting > 0 {
+		if waiting {
 			return
 		}
-		time.Sleep(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			t.Fatal("disassociation never waited on the repository row lock")
+		case <-ticker.C:
+		}
 	}
-	t.Fatal("disassociation never waited on the repository row lock")
 }
 
 // TestDisassociationStopsSyncRepublish proves a worker cannot publish repository
@@ -138,5 +143,93 @@ func TestDisassociationStopsSyncRepublish(t *testing.T) {
 	var published int
 	if err := pool.QueryRow(ctx, "SELECT count(*) FROM snapshots WHERE repository_id = $1", repoID).Scan(&published); err != nil || published != 0 {
 		t.Fatalf("snapshots after disassociation = %d, %v", published, err)
+	}
+}
+
+type pausedSnapshotPublisher struct {
+	*repository.PostgresSnapshotStore
+	ready     chan struct{}
+	resume    chan struct{}
+	completed chan error
+}
+
+func (p *pausedSnapshotPublisher) PublishSnapshot(ctx context.Context, tx db.TxManager, req repository.PublishSnapshotRequest) (domain.Snapshot, error) {
+	close(p.ready)
+	select {
+	case <-p.resume:
+	case <-ctx.Done():
+		return domain.Snapshot{}, ctx.Err()
+	}
+	snapshot, err := p.PostgresSnapshotStore.PublishSnapshot(ctx, tx, req)
+	p.completed <- err
+	return snapshot, err
+}
+
+func TestDisassociationCancelsRunningSyncBeforePublish(t *testing.T) {
+	f := localSyncFixture(t)
+	f.write(t, "source.txt", "initial contents\n")
+	f.commit(t, "initial snapshot")
+	f.sync(t, "main")
+	f.write(t, "source.txt", "updated contents\n")
+	f.commit(t, "changed snapshot")
+
+	publisher := &pausedSnapshotPublisher{
+		PostgresSnapshotStore: f.store,
+		ready:                 make(chan struct{}),
+		resume:                make(chan struct{}),
+		completed:             make(chan error, 1),
+	}
+	syncer := service.NewSyncService(f.repos, publisher, f.tx, f.scanner, f.cfg.Sync, f.log)
+	registry := &worker.Registry{}
+	if err := worker.RegisterSyncHandler(registry, syncer); err != nil {
+		t.Fatal(err)
+	}
+	jobs := repository.NewPostgresJobStore(f.pool)
+	cfg := f.cfg.Worker
+	// Let the publish attempt reach PostgreSQL before the heartbeat can cancel it.
+	cfg.HeartbeatInterval = 30 * time.Second
+	cfg.LeaseDuration = time.Minute
+	jobService := service.NewJobService(jobs, registry, cfg)
+	payload := fmt.Sprintf(`{"project_id":%q,"repository_id":%q,"ref":"main"}`, f.projectID, f.repoID)
+	queued := enqueueJob(t, jobService, "repository.sync", payload, 2, 20)
+	startJobWorker(t, cfg, jobs, registry)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	select {
+	case <-publisher.ready:
+	case <-ctx.Done():
+		t.Fatal("running sync did not reach snapshot publishing")
+	}
+	running, err := jobs.GetByID(ctx, queued.ID)
+	if err != nil || running.Status != domain.JobRunning || running.CancelRequestedAt != nil {
+		t.Fatalf("job before disassociation: %+v, %v", running, err)
+	}
+	if err := f.repos.Delete(ctx, f.projectID, f.repoID); err != nil {
+		t.Fatalf("disassociate repository: %v", err)
+	}
+	running, err = jobs.GetByID(ctx, queued.ID)
+	if err != nil || running.Status != domain.JobRunning || running.CancelRequestedAt == nil {
+		t.Fatalf("job after disassociation: %+v, %v", running, err)
+	}
+	close(publisher.resume)
+
+	finished := waitJob(t, jobs, queued.ID, jobStatus(domain.JobCancelled))
+	if finished.Attempt != 1 || finished.FinishedAt == nil || len(finished.Result) != 0 {
+		t.Fatalf("cancelled job: %+v", finished)
+	}
+	select {
+	case err := <-publisher.completed:
+		if !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("publish after disassociation = %v, want not found", err)
+		}
+	default:
+		t.Fatal("job finished without attempting to publish")
+	}
+	var snapshots, files int
+	if err := f.pool.QueryRow(t.Context(), `SELECT
+		(SELECT count(*) FROM snapshots WHERE repository_id = $1),
+		(SELECT count(*) FROM source_files WHERE repository_id = $1)`, f.repoID).Scan(&snapshots, &files); err != nil || snapshots != 0 || files != 0 {
+		t.Fatalf("repository data after disassociation: %d snapshots, %d files, %v", snapshots, files, err)
 	}
 }

@@ -129,7 +129,7 @@ func (r *PostgresRepositoryStore) Delete(ctx context.Context, projectID, repoID 
 		// repository scope, so a stale write cannot silently overwrite the shift.
 		if _, err := conn.Exec(ctx, `
 			UPDATE documents SET metadata = jsonb_set(metadata, '{origin}',
-				jsonb_build_object('repository_id', $2::text, 'repository_name', $3)),
+				jsonb_build_object('repository_id', $2::text, 'repository_name', $3::text)),
 				version = version + 1, updated_at = NOW()
 			WHERE project_id = $1 AND repository_id = $2`, projectID, repoID, name); err != nil {
 			return err
