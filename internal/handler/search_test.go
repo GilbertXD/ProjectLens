@@ -122,7 +122,7 @@ func TestSearchHandlerRepositoryAndCrossRepositoryFilters(t *testing.T) {
 			t.Fatalf("%s returned %d %s", tc.path, w.Code, w.Body)
 		}
 	}
-	for _, query := range []string{"scope=all", "scope=project", "repository_id=" + other.String(), "repository_ids=" + repo.String(), "repository_role=primary"} {
+	for _, query := range []string{"scope=all", "scope=project", "repository_id=" + other.String(), "repository_ids=" + repo.String(), "repository_role=primary", "include_project_documents=true"} {
 		w := httptest.NewRecorder()
 		searchTestRouter(nil).ServeHTTP(w, httptest.NewRequest(http.MethodGet, scoped+"&"+query, nil))
 		assertSearchHTTPError(t, w, 400, "invalid_input")

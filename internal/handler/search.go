@@ -43,6 +43,7 @@ func (h *SearchHandler) search(c *gin.Context) {
 			err = fmt.Errorf("%w: invalid repository ID", domain.ErrInvalidInput)
 		case filter.RepositoryID != nil && *filter.RepositoryID != id,
 			len(filter.RepositoryIDs) > 0, filter.RepositoryRole != "",
+			filter.IncludeProjectDocuments,
 			filter.Scope != "" && filter.Scope != domain.SearchScopeRepository:
 			err = fmt.Errorf("%w: repository search filters must match the repository in the path", domain.ErrInvalidInput)
 		default:

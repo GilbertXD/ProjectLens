@@ -43,18 +43,20 @@ type SearchFilter struct {
 	Offset                  int
 }
 
-// EffectiveScope resolves the shorthand repository filters.
+// EffectiveScope resolves the shorthand repository filters into an explicit
+// scope. It returns "" when the request determines no scope, and callers must
+// reject that instead of widening the search to the whole project.
 func (f SearchFilter) EffectiveScope() SearchScope {
-	if f.Scope != "" && f.Scope != SearchScopeAll {
+	switch {
+	case f.Scope != "":
 		return f.Scope
-	}
-	if f.RepositoryID != nil {
+	case f.RepositoryID != nil:
 		return SearchScopeRepository
-	}
-	if len(f.RepositoryIDs) > 0 || f.RepositoryRole != "" {
+	case len(f.RepositoryIDs) > 0 || f.RepositoryRole != "":
 		return SearchScopeCrossRepository
+	default:
+		return ""
 	}
-	return SearchScopeAll
 }
 
 type SearchLocation struct {

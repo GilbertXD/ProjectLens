@@ -161,7 +161,13 @@ func (s *SearchService) normalizeFilter(filter domain.SearchFilter) (domain.Sear
 	}
 	filter.Scope = filter.EffectiveScope()
 	switch filter.Scope {
+	case "":
+		return filter, fmt.Errorf("%w: scope is required; pass scope=project, scope=repository with repository_id, "+
+			"scope=cross_repository with repository_ids or repository_role, or scope=all", domain.ErrInvalidInput)
 	case domain.SearchScopeAll:
+		if filter.RepositoryID != nil || len(filter.RepositoryIDs) > 0 || filter.RepositoryRole != "" {
+			return filter, fmt.Errorf("%w: all scope cannot be combined with repository filters", domain.ErrInvalidInput)
+		}
 	case domain.SearchScopeProject:
 		if filter.RepositoryID != nil || len(filter.RepositoryIDs) > 0 || filter.RepositoryRole != "" {
 			return filter, fmt.Errorf("%w: project scope cannot be combined with repository filters", domain.ErrInvalidInput)
@@ -177,8 +183,8 @@ func (s *SearchService) normalizeFilter(filter domain.SearchFilter) (domain.Sear
 	default:
 		return filter, fmt.Errorf("%w: invalid scope %q", domain.ErrInvalidInput, filter.Scope)
 	}
-	if filter.Scope != domain.SearchScopeCrossRepository {
-		filter.IncludeProjectDocuments = false
+	if filter.IncludeProjectDocuments && filter.Scope != domain.SearchScopeCrossRepository {
+		return filter, fmt.Errorf("%w: include_project_documents requires cross_repository scope", domain.ErrInvalidInput)
 	}
 	filter.RepositoryIDs = slices.Clone(filter.RepositoryIDs)
 	slices.SortFunc(filter.RepositoryIDs, func(a, b uuid.UUID) int { return bytes.Compare(a[:], b[:]) })

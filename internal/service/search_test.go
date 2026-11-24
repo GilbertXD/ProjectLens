@@ -76,10 +76,16 @@ func TestSearchFilterValidation(t *testing.T) {
 		{Query: "ok", SourceTypes: []domain.SearchSourceType{"unknown"}},
 		{Query: "ok", PathPrefix: "\xff"}, {Query: "ok", PathPrefix: "\x00"},
 		{Query: "ok", Scope: "invalid"},
+		{Query: "ok"},
 		{Query: "ok", Scope: domain.SearchScopeRepository},
 		{Query: "ok", Scope: domain.SearchScopeProject, RepositoryID: &repoID},
 		{Query: "ok", Scope: domain.SearchScopeProject, RepositoryIDs: []uuid.UUID{repoID}},
 		{Query: "ok", Scope: domain.SearchScopeProject, RepositoryRole: domain.RepositoryRolePrimary},
+		{Query: "ok", Scope: domain.SearchScopeAll, RepositoryID: &repoID},
+		{Query: "ok", Scope: domain.SearchScopeAll, RepositoryIDs: []uuid.UUID{repoID}},
+		{Query: "ok", Scope: domain.SearchScopeAll, RepositoryRole: domain.RepositoryRolePrimary},
+		{Query: "ok", Scope: domain.SearchScopeAll, IncludeProjectDocuments: true},
+		{Query: "ok", Scope: domain.SearchScopeProject, IncludeProjectDocuments: true},
 		{Query: "ok", Scope: domain.SearchScopeCrossRepository, RepositoryID: &repoID},
 		{Query: "ok", RepositoryID: &repoID, RepositoryRole: domain.RepositoryRolePrimary},
 		{Query: "ok", RepositoryRole: "invalid"},
@@ -92,7 +98,7 @@ func TestSearchFilterValidation(t *testing.T) {
 	if store.reads != 0 {
 		t.Fatal("invalid filters reached PostgreSQL")
 	}
-	result, err := svc.Search(t.Context(), id, domain.SearchFilter{Query: " 搜索 "})
+	result, err := svc.Search(t.Context(), id, domain.SearchFilter{Query: " 搜索 ", Scope: domain.SearchScopeAll})
 	if err != nil || result.Query != "搜索" || result.Limit != 3 || result.CacheStatus != domain.SearchCacheStatusBypass {
 		t.Fatalf("validated search = %+v, %v", result, err)
 	}
@@ -104,7 +110,7 @@ func TestSearchCacheKeysAndInvalidation(t *testing.T) {
 	cfg := config.DefaultSearchConfig()
 	svc := NewSearchService(store, cache, cfg, "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	project := uuid.NewString()
-	f := domain.SearchFilter{Query: " café ", SourceTypes: []domain.SearchSourceType{
+	f := domain.SearchFilter{Query: " café ", Scope: domain.SearchScopeAll, SourceTypes: []domain.SearchSourceType{
 		domain.SearchSourceLocalGit, domain.SearchSourceGitHub, domain.SearchSourceLocalGit,
 	}}
 	result, err := svc.Search(t.Context(), project, f)
@@ -115,7 +121,7 @@ func TestSearchCacheKeysAndInvalidation(t *testing.T) {
 	if !regexp.MustCompile("^test:search:v2:p:" + project + ":ver:17:q:[a-f0-9]{64}$").MatchString(key) {
 		t.Fatalf("unexpected key %q", key)
 	}
-	f = domain.SearchFilter{Query: "café", Limit: cfg.DefaultLimit, SourceTypes: []domain.SearchSourceType{
+	f = domain.SearchFilter{Query: "café", Scope: domain.SearchScopeAll, Limit: cfg.DefaultLimit, SourceTypes: []domain.SearchSourceType{
 		domain.SearchSourceGitHub, domain.SearchSourceLocalGit,
 	}}
 	result, err = svc.Search(t.Context(), project, f)
@@ -126,7 +132,14 @@ func TestSearchCacheKeysAndInvalidation(t *testing.T) {
 	for _, change := range []func(*domain.SearchFilter){
 		func(q *domain.SearchFilter) { q.Query += " fi" },
 		func(q *domain.SearchFilter) { q.SourceTypes = q.SourceTypes[:1] },
-		func(q *domain.SearchFilter) { q.RepositoryID = &repoID },
+		func(q *domain.SearchFilter) { q.Scope, q.RepositoryID = domain.SearchScopeRepository, &repoID },
+		func(q *domain.SearchFilter) { q.Scope = domain.SearchScopeProject },
+		func(q *domain.SearchFilter) {
+			q.Scope, q.RepositoryIDs = domain.SearchScopeCrossRepository, []uuid.UUID{repoID}
+		},
+		func(q *domain.SearchFilter) {
+			q.Scope, q.RepositoryIDs, q.IncludeProjectDocuments = domain.SearchScopeCrossRepository, []uuid.UUID{repoID}, true
+		},
 		func(q *domain.SearchFilter) { q.PathPrefix = "src/" },
 		func(q *domain.SearchFilter) { q.Limit++ },
 		func(q *domain.SearchFilter) { q.Offset++ },
@@ -137,6 +150,21 @@ func TestSearchCacheKeysAndInvalidation(t *testing.T) {
 		if err != nil || result.CacheStatus != domain.SearchCacheStatusMiss || cache.key == key {
 			t.Errorf("changed filter %+v returned %+v, %v", filter, result, err)
 		}
+	}
+	// Same query, different scopes: each scope caches under its own key, while an
+	// equivalent shorthand filter reuses the entry it normalises to.
+	scoped := domain.SearchFilter{Query: "café", Scope: domain.SearchScopeRepository, RepositoryID: &repoID}
+	if _, err := svc.Search(t.Context(), project, scoped); err != nil {
+		t.Fatal(err)
+	}
+	scopedKey := cache.key
+	result, err = svc.Search(t.Context(), project, domain.SearchFilter{Query: "café", RepositoryID: &repoID})
+	if err != nil || result.CacheStatus != domain.SearchCacheStatusHit || cache.key != scopedKey {
+		t.Fatalf("repository shorthand = %+v, %v, key = %q", result, err, cache.key)
+	}
+	scoped.Scope, scoped.RepositoryID = domain.SearchScopeProject, nil
+	if _, err := svc.Search(t.Context(), project, scoped); err != nil || cache.key == scopedKey {
+		t.Fatalf("project scope reused the repository entry: %v, key = %q", err, cache.key)
 	}
 	if result, err = svc.Search(t.Context(), uuid.NewString(), f); err != nil || result.CacheStatus != domain.SearchCacheStatusMiss || cache.key == key {
 		t.Fatalf("other project search = %+v, %v", result, err)

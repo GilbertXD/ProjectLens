@@ -290,7 +290,7 @@ import_and_sync() {
     request 200 GET "$scoped/issues/1" yes
     jq -e '.title=="Fixture issue" and .id==123' "$body" >/dev/null
   fi
-  request 200 GET "$project_api/search?q=deliveryquasar&source_type=$kind" yes
+  request 200 GET "$project_api/search?q=deliveryquasar&source_type=$kind&scope=all" yes
   jq -e --arg kind "$kind" --arg repo "$repo" --arg commit "$commit" \
     '.total == 1 and (.items[0] | .source_type == $kind and .location.repository_id == $repo and .location.commit_hash == $commit)' "$body" >/dev/null
 }
@@ -299,7 +299,7 @@ import_and_sync github https://github.com/owner/project
 
 search_cache() {
   local expected="$1" hits="$2"
-  request 200 GET "$project_api/search?q=deliveryquasar" yes
+  request 200 GET "$project_api/search?q=deliveryquasar&scope=all" yes
   tr -d '\r' < "$headers" | grep -ix "X-Search-Cache: $expected" >/dev/null
   grep -iq '^X-Search-Version: [1-9][0-9]*' "$headers"
   jq -e --arg expected "$expected" --argjson hits "$hits" \

@@ -79,7 +79,7 @@ func TestBackendLoad(t *testing.T) {
 	}
 	measure("history_page", 100, nil, func() error { _, err := history.Read(ctx, target, "list", "", "", 20, 0); return err })
 	search := repository.NewPostgresSearchStore(f.pool)
-	filter := domain.SearchFilter{Query: "needle", Limit: 20}
+	filter := domain.SearchFilter{Query: "needle", Scope: domain.SearchScopeAll, Limit: 20}
 	measure("search", 100, nil, func() error { _, err := search.Search(ctx, f.projectID, filter); return err })
 	// Capture the actual server-prepared SQL on the same session as the query.
 	explain := func(conn db.DBTX, ctx context.Context, label, sql string, args ...any) error {

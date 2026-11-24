@@ -79,8 +79,10 @@ func openSearchCache(t *testing.T, cfg config.RedisConfig) *cache.RedisSearchCac
 	return client
 }
 
+// searchPath requests the whole project explicitly. A project search without a
+// scope or a scope-determining filter is rejected, never widened implicitly.
 func searchPath(projectID uuid.UUID, q string) string {
-	return projects + "/" + projectID.String() + "/search?q=" + url.QueryEscape(q)
+	return projects + "/" + projectID.String() + "/search?q=" + url.QueryEscape(q) + "&scope=all"
 }
 
 func searchRequest(t *testing.T, srv *httptest.Server, path string, status domain.SearchCacheStatus) domain.SearchResult {
@@ -158,6 +160,7 @@ func TestUnifiedSearch(t *testing.T) {
 	request(t, srv, "POST", projects+"/"+other.ID.String()+"/documents", `{"title":"Quasar elsewhere","content":"Isolated."}`, 201, nil)
 
 	mainQuery := searchPath(f.projectID, "quasar")
+	request(t, srv, "GET", projects+"/"+f.projectID.String()+"/search?q=quasar", "", 400, nil)
 	full := searchRequest(t, srv, mainQuery, domain.SearchCacheStatusMiss)
 	if full.Total != 4 || len(full.Items) != 4 || full.Limit != 20 || full.Offset != 0 || full.Query != "quasar" {
 		t.Fatalf("unified results = %+v", full)
@@ -219,20 +222,22 @@ func TestUnifiedSearch(t *testing.T) {
 		escapedPath.Items[0].Snippet != "src/A&amp;b/<mark>nebula</mark>_notes.txt" {
 		t.Fatalf("escaped path-only snippet = %+v", escapedPath)
 	}
+	// Each row states its own scope so no case relies on a default.
+	queryBase := projects + "/" + f.projectID.String() + "/search?q=quasar"
 	for _, tc := range []struct {
 		params string
 		total  int64
 		source domain.SearchSourceType
 	}{
-		{"&source_type=document", 1, domain.SearchSourceDocument},
-		{"&source_type=github,document&source_type=github", 2, ""},
+		{"&scope=all&source_type=document", 1, domain.SearchSourceDocument},
+		{"&scope=all&source_type=github,document&source_type=github", 2, ""},
 		{"&repository_id=" + githubRepo.ID.String(), 1, domain.SearchSourceGitHub},
 		{"&repository_id=" + githubRepo.ID.String() + "&source_type=document", 0, ""},
-		{"&path_prefix=src%2Fquasar", 1, domain.SearchSourceLocalGit},
-		{"&path_prefix=src%2Fcopy_", 0, ""},
-		{"&path_prefix=src%2Fcopy%25", 0, ""},
+		{"&scope=all&path_prefix=src%2Fquasar", 1, domain.SearchSourceLocalGit},
+		{"&scope=all&path_prefix=src%2Fcopy_", 0, ""},
+		{"&scope=all&path_prefix=src%2Fcopy%25", 0, ""},
 	} {
-		page := searchRequest(t, srv, mainQuery+tc.params, domain.SearchCacheStatusMiss)
+		page := searchRequest(t, srv, queryBase+tc.params, domain.SearchCacheStatusMiss)
 		if page.Total != tc.total || int64(len(page.Items)) != tc.total ||
 			(tc.source != "" && page.Items[0].SourceType != tc.source) {
 			t.Fatalf("filter %s = %+v", tc.params, page)
@@ -453,14 +458,34 @@ func TestUnifiedSearchRedisOutage(t *testing.T) {
 	t.Cleanup(srv.Close)
 	request(t, srv, "POST", projects+"/"+f.projectID.String()+"/documents",
 		`{"title":"Searchable while offline","content":"Resilient."}`, 201, nil)
+	base := projects + "/" + f.projectID.String()
+	offlinePath := "/offline"
+	repo, err := f.repos.Create(t.Context(), domain.Repository{
+		ID: uuid.New(), ProjectID: f.projectID, SourceType: domain.RepositorySourceLocalGit, Name: "Offline repository",
+		Source: offlinePath, CanonicalSource: offlinePath, DefaultBranch: "main", LocalPath: &offlinePath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request(t, srv, "POST", base+"/repositories/"+repo.ID.String()+"/documents",
+		`{"title":"Repository while offline","content":"Resilient."}`, 201, nil)
 	path := searchPath(f.projectID, "resilient")
 	searchRequest(t, srv, path, domain.SearchCacheStatusMiss)
 	searchRequest(t, srv, path, domain.SearchCacheStatusHit)
 
 	redisServer.Close()
 	offline := searchRequest(t, srv, path, domain.SearchCacheStatusDegraded)
-	if offline.Total != 1 {
+	if offline.Total != 2 {
 		t.Fatalf("search during Redis outage = %+v", offline)
+	}
+	projectScoped := searchRequest(t, srv, base+"/search?q=resilient&scope=project", domain.SearchCacheStatusDegraded)
+	if projectScoped.Total != 1 || projectScoped.Items[0].Location.RepositoryID != nil {
+		t.Fatalf("project scope during Redis outage = %+v", projectScoped)
+	}
+	repositoryScoped := searchRequest(t, srv, base+"/repositories/"+repo.ID.String()+"/search?q=resilient", domain.SearchCacheStatusDegraded)
+	if repositoryScoped.Total != 1 || repositoryScoped.Items[0].Location.RepositoryID == nil ||
+		*repositoryScoped.Items[0].Location.RepositoryID != repo.ID {
+		t.Fatalf("repository scope during Redis outage = %+v", repositoryScoped)
 	}
 	request(t, srv, "GET", "/readyz", "", 200, nil)
 
@@ -535,7 +560,7 @@ func assertSearchIndexes(t *testing.T, f *syncFixture, snapshotID uuid.UUID) {
 		if _, err := conn.Exec(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
 			return err
 		}
-		page, err := store.Search(ctx, f.projectID, domain.SearchFilter{Query: "quasar", Limit: 10})
+		page, err := store.Search(ctx, f.projectID, domain.SearchFilter{Query: "quasar", Scope: domain.SearchScopeAll, Limit: 10})
 		if err != nil {
 			return err
 		}

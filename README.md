@@ -91,27 +91,32 @@ curl -fsS http://localhost:8080/api/v1/projects \
 
 ## Unified Search API
 
-Search a project's active Git snapshots and its project- and repository-level Markdown documents with `GET /api/v1/projects/:id/search`.
+Search a project's active Git snapshots and its project- and repository-level Markdown documents with `GET /api/v1/projects/:id/search`. A project search must state its scope: there is no implicit whole-project default.
 
 ```sh
 curl -G "http://localhost:8080/api/v1/projects/$PROJECT_ID/search" \
   -H "Authorization: Bearer $PROJECTLENS_TOKEN" \
   --data-urlencode 'q="connection pool" OR timeout' \
+  --data-urlencode 'scope=all' \
   --data-urlencode 'source_type=local_git,github,document' \
   --data-urlencode 'limit=20' \
   --data-urlencode 'offset=0'
 ```
 
 - `q` is required and defaults to a maximum of 200 characters. Use quotes for phrases, `OR` for alternatives, and a minus sign to exclude a term.
+- `scope` selects the knowledge the query may read. `scope=project` reads project-level documents only. `scope=repository` reads one repository and requires `repository_id`. `scope=cross_repository` reads repositories, optionally narrowed with `repository_ids` (repeat the parameter or use comma-separated IDs) and `repository_role=primary|reference`; add `include_project_documents=true` to include project-level documents in those results. `scope=all` reads the whole project.
+- Without `scope`, the request needs a filter that determines it: `repository_id` implies `scope=repository`, and `repository_ids` or `repository_role` imply `scope=cross_repository`. A project search with neither returns `400 invalid_input`. The request is never widened to the whole project.
+- Contradictory combinations return `400 invalid_input`, for example `scope=all` with repository filters, `scope=project` with repository filters, `scope=repository` without `repository_id` or with `repository_ids`/`repository_role`, `scope=cross_repository` with `repository_id`, and `include_project_documents` outside `scope=cross_repository`.
 - `source_type` accepts `local_git`, `github`, and `document`. Repeat the parameter or separate the values with commas. By default, all source types are included.
-- Use `GET /api/v1/projects/:id/repositories/:repoId/search` or pass `repository_id` to project search to retrieve a single repository’s files and documents.
-- Use `scope=project` for project-level documents. Use `scope=cross_repository` to search repositories explicitly, with optional `repository_ids` (repeat the parameter or use comma-separated IDs) and `repository_role=primary|reference`. Either repository filter also selects cross-repository search. Add `include_project_documents=true` to include project-level documents in those results.
+- `GET /api/v1/projects/:id/repositories/:repoId/search` always searches exactly that repository: its files and its repository-owned documents, never other repositories and never project-level documents. `scope`, `repository_ids`, `repository_role`, `include_project_documents`, and a different `repository_id` are rejected rather than allowed to widen the path.
 - `path_prefix` limits results to files whose paths begin with the literal prefix. A repository ID outside the project returns `404`.
 - `limit` defaults to 20 and accepts up to 100. `offset` defaults to zero. Pages include the full match `total` and an empty `items` array when the offset is beyond the last match.
 
 Each hit has a relevance score, a snippet with HTML-escaped text and `<mark>` highlights, and a `location.api_path` to fetch the full content. File locations include repository, snapshot, commit, and path information. GitHub hits include a link pinned to the indexed commit. Locations include `scope` and, for repository-owned results, `repository_id`, `repository_name`, `repository_role`, and `repository_source`. Document locations also include the document ID, title, and version. A content match includes its first matching line when available.
 
-Redis is enabled by default. Compose starts Redis, publishes port 6379 by default (`REDIS_PORT`), and connects the API to `redis:6379`. A server running on the host uses `localhost:6379` by default. If you use `.env.example` as a Compose environment file, set `REDIS_ADDR=redis:6379` for the container. Set `REDIS_ENABLED=false` to bypass the cache, or configure `REDIS_*` and `SEARCH_*` using the values in `.env.example`. Cached results expire after five minutes by default. Search reads the project's version from PostgreSQL so writes that change searchable content or provenance invalidate older results. Responses include `X-Search-Version` and `X-Search-Cache`, whose value is `hit`, `miss`, `bypass`, or `degraded`. Redis errors fall back to PostgreSQL and are reported as `checks.redis=degraded` at `/readyz`.
+Repositories stay independent knowledge sources: a local working tree and a GitHub repository with the same name, remote URL, or commit SHA are still separate, and `scope=all` reports them as separate locations.
+
+Redis is enabled by default. Compose starts Redis, publishes port 6379 by default (`REDIS_PORT`), and connects the API to `redis:6379`. A server running on the host uses `localhost:6379` by default. If you use `.env.example` as a Compose environment file, set `REDIS_ADDR=redis:6379` for the container. Set `REDIS_ENABLED=false` to bypass the cache, or configure `REDIS_*` and `SEARCH_*` using the values in `.env.example`. Cached results expire after five minutes by default. Cache entries are keyed by the resolved scope and repository filters, so different scopes never share a result and equivalent shorthands do. Search reads the project's version from PostgreSQL so writes that change searchable content or provenance invalidate older results. Responses include `X-Search-Version` and `X-Search-Cache`, whose value is `hit`, `miss`, `bypass`, or `degraded`. Redis errors fall back to PostgreSQL and are reported as `checks.redis=degraded` at `/readyz`; the degraded path applies the same scope rules.
 
 With `TEST_DATABASE_URL` set, the search integration tests use an in-process Redis server by default. Set `TEST_REDIS_URL` to exercise caching against an external Redis instance. Outage and recovery tests use their own isolated Redis server.
 

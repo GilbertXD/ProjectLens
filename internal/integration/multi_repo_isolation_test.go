@@ -249,7 +249,7 @@ func TestMultiRepositoryIsolation(t *testing.T) {
 		{projectSearch + "&repository_role=reference&include_project_documents=true", []isolationRepository{c}, true, false},
 		{projectSearch + "&scope=cross_repository&repository_role=primary&repository_ids=" + b.ID.String() + "," + c.ID.String(), []isolationRepository{b}, false, false},
 		{projectSearch + "&scope=cross_repository&include_project_documents=true&path_prefix=src/", []isolationRepository{a, b, c}, false, true},
-		{projectSearch, []isolationRepository{a, b, c}, true, false},
+		{projectSearch + "&scope=all", []isolationRepository{a, b, c}, true, false},
 	} {
 		result := searchRequest(t, api, tc.path, domain.SearchCacheStatusMiss)
 		var projectNote domain.Document
@@ -258,6 +258,31 @@ func TestMultiRepositoryIsolation(t *testing.T) {
 		}
 		assertIsolationSearch(t, result, base, projectDocuments(projectNote), tc.filesOnly, tc.repos...)
 	}
+	// The scope must be explicit: no implicit widening and no silent correction.
+	for _, path := range []string{
+		projectSearch,
+		projectSearch + "&scope=all&repository_role=primary",
+		projectSearch + "&scope=all&repository_id=" + a.ID.String(),
+		projectSearch + "&scope=all&include_project_documents=true",
+		projectSearch + "&scope=project&repository_role=primary",
+		projectSearch + "&scope=project&include_project_documents=true",
+		projectSearch + "&scope=repository",
+		projectSearch + "&scope=cross_repository&repository_id=" + a.ID.String(),
+		projectSearch + "&scope=unknown",
+		a.path + "/search?q=isolationmarker&scope=cross_repository",
+		a.path + "/search?q=isolationmarker&repository_ids=" + b.ID.String(),
+		a.path + "/search?q=isolationmarker&repository_role=primary",
+		a.path + "/search?q=isolationmarker&include_project_documents=true",
+		b.path + "/search?q=isolationmarker&repository_id=" + a.ID.String(),
+	} {
+		request(t, api, "GET", path, "", 400, nil)
+	}
+	// Scopes own separate cache entries, and an equivalent shorthand reuses one.
+	if result := searchRequest(t, api, projectSearch+"&scope=repository&repository_id="+b.ID.String(), domain.SearchCacheStatusHit); len(result.Items) != 1 {
+		t.Fatalf("equivalent repository shorthand missed the cache: %+v", result)
+	}
+	searchRequest(t, api, projectSearch+"&scope=project", domain.SearchCacheStatusHit)
+	searchRequest(t, api, projectSearch+"&scope=all", domain.SearchCacheStatusHit)
 	filtered := projectSearch + "&repository_role=primary"
 	primaries := searchRequest(t, api, filtered, domain.SearchCacheStatusMiss)
 	assertIsolationSearch(t, primaries, base, nil, false, a, b)

@@ -923,16 +923,17 @@ paths:
     get:
       operationId: "searchProject"
       summary: "Search active Git snapshots and Markdown documents"
+      description: "The scope must be explicit. Pass scope, or a filter that determines it: repository_id implies repository scope, and repository_ids or repository_role imply cross_repository scope. A request that determines no scope returns 400 instead of searching the whole project. Contradictory combinations, such as all with repository filters, project with repository filters, repository without repository_id, cross_repository with repository_id, or include_project_documents outside cross_repository, return 400."
       security:
         - {"BearerAuth": []}
       parameters:
         - {"name": "q", "in": "query", "required": true, "schema": {"type": "string", "minLength": 1}}
         - {"name": "source_type", "in": "query", "schema": {"type": "array", "items": {"type": "string", "enum": ["local_git", "github", "document"]}}, "style": "form", "explode": true, "description": "Repeat this parameter or supply comma-separated source types."}
         - {"$ref": "#/components/parameters/RepositoryIDFilter"}
-        - {"name": "scope", "in": "query", "schema": {"$ref": "#/components/schemas/SearchScope"}, "description": "Defaults to all content. Use project for project documents only, repository with repository_id, or cross_repository to select repositories explicitly."}
-        - {"name": "repository_ids", "in": "query", "schema": {"type": "array", "items": {"type": "string", "format": "uuid"}}, "style": "form", "explode": true, "description": "Cross-repository selection. Repeat the parameter or supply comma-separated UUIDs."}
-        - {"name": "repository_role", "in": "query", "schema": {"$ref": "#/components/schemas/RepositoryRole"}, "description": "Cross-repository selection by role."}
-        - {"name": "include_project_documents", "in": "query", "schema": {"type": "boolean", "default": false}, "description": "Include project-level documents in cross-repository search."}
+        - {"name": "scope", "in": "query", "schema": {"$ref": "#/components/schemas/SearchScope"}, "description": "Required unless a repository filter determines it. project reads project-level documents only, repository reads one repository and requires repository_id, cross_repository reads repositories optionally narrowed by repository_ids or repository_role, and all reads the whole project."}
+        - {"name": "repository_ids", "in": "query", "schema": {"type": "array", "items": {"type": "string", "format": "uuid"}}, "style": "form", "explode": true, "description": "Cross-repository selection. Repeat the parameter or supply comma-separated UUIDs. Implies cross_repository scope."}
+        - {"name": "repository_role", "in": "query", "schema": {"$ref": "#/components/schemas/RepositoryRole"}, "description": "Cross-repository selection by role. Implies cross_repository scope."}
+        - {"name": "include_project_documents", "in": "query", "schema": {"type": "boolean", "default": false}, "description": "Include project-level documents in cross-repository search. Requires scope=cross_repository."}
         - {"name": "path_prefix", "in": "query", "schema": {"type": "string"}}
         - {"$ref": "#/components/parameters/Limit"}
         - {"$ref": "#/components/parameters/Offset"}
@@ -966,7 +967,7 @@ paths:
     get:
       operationId: "searchRepository"
       summary: "Search one repository’s active files and Markdown documents"
-      description: "If supplied, scope must be repository and repository_id must match the path."
+      description: "Always searches exactly the repository in the path: its active files and its repository-owned documents, never other repositories and never project-level documents. scope, if supplied, must be repository, and repository_id, if supplied, must match the path. repository_ids, repository_role, and include_project_documents are rejected because they could widen the path scope."
       security:
         - {"BearerAuth": []}
       parameters:
@@ -1668,6 +1669,7 @@ components:
       name: "repository_id"
       in: "query"
       schema: {"type": "string", "format": "uuid"}
+      description: "Restrict search to one repository and imply repository scope."
     IfMatch:
       name: "If-Match"
       in: "header"
@@ -2069,10 +2071,13 @@ components:
       properties:
         message: {"type": "string", "example": "pong"}
     ProjectStatus: {"type": "string", "enum": ["active", "archived"]}
+    SearchScope:
+      type: "string"
+      enum: ["all", "project", "repository", "cross_repository"]
+      description: "Knowledge scope of a search. There is no implicit default: pass this or a repository filter that determines it."
     RepositorySourceType: {"type": "string", "enum": ["local_git", "github"]}
     RepositoryRole: {"type": "string", "enum": ["primary", "reference"]}
     KnowledgeScope: {"type": "string", "enum": ["project", "repository"]}
-    SearchScope: {"type": "string", "enum": ["all", "project", "repository", "cross_repository"]}
     SnapshotStatus: {"type": "string", "enum": ["staging", "active", "superseded", "failed"]}
     JobStatus: {"type": "string", "enum": ["pending", "running", "succeeded", "failed", "cancelled"]}
     SearchHitKind: {"type": "string", "enum": ["source_file", "document"]}
