@@ -33,6 +33,7 @@ func NewJobHandler(service JobService, log *slog.Logger) *JobHandler {
 }
 
 func (h *JobHandler) Register(api *gin.RouterGroup) {
+	api.POST("/projects/:id/repositories/:repoId/sync", h.syncRepository)
 	jobs := api.Group("/jobs")
 	jobs.POST("", h.enqueue)
 	jobs.GET("", h.list)
@@ -64,6 +65,33 @@ func (h *JobHandler) enqueue(c *gin.Context) {
 		status = http.StatusAccepted
 	}
 	h.respond(c, status, job, err)
+}
+
+func (h *JobHandler) syncRepository(c *gin.Context) {
+	var ref string
+	if c.Request.ContentLength != 0 {
+		input, err := decodeRepository[struct {
+			Ref string `json:"ref"`
+		}](c)
+		if err != nil {
+			h.respond(c, 0, nil, err)
+			return
+		}
+		ref = input.Ref
+	}
+	payload, _ := json.Marshal(gin.H{"project_id": c.Param("id"), "repository_id": c.Param("repoId"), "ref": ref})
+	job, created, err := h.service.Enqueue(c.Request.Context(), domain.CreateJobInput{Type: "repository.sync", Payload: payload})
+	if err != nil {
+		h.respond(c, 0, nil, err)
+		return
+	}
+	url := "/api/v1/jobs/" + job.ID.String()
+	c.Header("Location", url)
+	status := http.StatusOK
+	if created {
+		status = http.StatusAccepted
+	}
+	c.JSON(status, gin.H{"job_id": job.ID, "status": job.Status, "poll_url": url})
 }
 
 func (h *JobHandler) list(c *gin.Context) {

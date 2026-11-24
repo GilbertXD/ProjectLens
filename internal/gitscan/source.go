@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"projectlens/internal/domain"
 )
@@ -13,16 +14,21 @@ type Source interface {
 	Prepare(context.Context, SourceSpec) (*PreparedRepo, error)
 }
 
-func scanRef(ref string) (string, error) {
-	if ref == "" {
+func NormalizeRef(ref string) (string, error) {
+	if ref == "" || ref == "@" {
 		return "HEAD", nil
 	}
 	// Fetch refspec metacharacters and revision expressions are excluded as well.
-	if strings.HasPrefix(ref, "-") || strings.HasPrefix(ref, "+") ||
+	if !utf8.ValidString(ref) || len(ref) > 255 || strings.HasSuffix(ref, ".") || strings.HasPrefix(ref, "-") || strings.HasPrefix(ref, "+") ||
 		strings.ContainsAny(ref, ":*?[]\\^~") ||
 		strings.Contains(ref, "..") || strings.Contains(ref, "@{") ||
 		strings.ContainsFunc(ref, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
 		return "", fmt.Errorf("%w: invalid Git ref", domain.ErrInvalidInput)
+	}
+	for component := range strings.SplitSeq(ref, "/") {
+		if component == "" || strings.HasPrefix(component, ".") || strings.HasSuffix(component, ".lock") {
+			return "", fmt.Errorf("%w: invalid Git ref", domain.ErrInvalidInput)
+		}
 	}
 	return ref, nil
 }

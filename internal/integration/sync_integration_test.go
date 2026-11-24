@@ -843,3 +843,57 @@ func TestLiveSnapshotSync(t *testing.T) {
 		})
 	}
 }
+
+func TestScopedSyncRequests(t *testing.T) {
+	f := localSyncFixture(t)
+	f.write(t, "README.md", "searchable")
+	f.commit(t, "initial")
+	reg := &worker.Registry{}
+	if err := worker.RegisterSyncHandler(reg, f.svc); err != nil {
+		t.Fatal(err)
+	}
+	store := repository.NewPostgresJobStore(f.pool)
+	jobs := service.NewJobService(store, reg, f.cfg.Worker)
+	srv := httptest.NewServer(router.New(f.cfg, f.log, router.Dependencies{Jobs: handler.NewJobHandler(jobs, f.log)}))
+	defer srv.Close()
+	path := "/api/v1/projects/" + f.projectID.String() + "/repositories/" + f.repoID.String() + "/sync"
+	var wg sync.WaitGroup
+	statuses := make(chan int, 12)
+	for range cap(statuses) {
+		wg.Go(func() {
+			res, err := http.Post(srv.URL+path, "application/json", nil)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			res.Body.Close()
+			statuses <- res.StatusCode
+		})
+	}
+	wg.Wait()
+	close(statuses)
+	created := 0
+	for s := range statuses {
+		if s == 202 {
+			created++
+		} else if s != 200 {
+			t.Fatal(s)
+		}
+	}
+	if created != 1 {
+		t.Fatalf("created %d", created)
+	}
+	var got struct {
+		ID  uuid.UUID `json:"job_id"`
+		URL string    `json:"poll_url"`
+	}
+	request(t, srv, "POST", path, "{}", 200, &got)
+	request(t, srv, "POST", path, `{"ref":"other"}`, 409, nil)
+	request(t, srv, "POST", path, `{"source":"/tmp"}`, 400, nil)
+	request(t, srv, "POST", path, `{"ref":"bad//ref"}`, 400, nil)
+	request(t, srv, "POST", strings.Replace(path, f.projectID.String(), uuid.NewString(), 1), "", 404, nil)
+	startJobWorker(t, f.cfg.Worker, store, reg)
+	waitJob(t, store, got.ID, jobStatus(domain.JobSucceeded))
+	request(t, srv, "GET", got.URL, "", 200, nil)
+	request(t, srv, "POST", path, "", 202, nil)
+}

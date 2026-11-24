@@ -146,7 +146,7 @@ func TestRepositoryHandlerManagement(t *testing.T) {
 		{"GET", "?source_type=github&limit=3&offset=6", "", `"total":5`, 200},
 		{"GET", "/repo", "", `"name":"original"`, 200},
 		{"PATCH", "/repo", `{"name":"renamed"}`, `"name":"renamed"`, 200},
-		{"POST", "/repo/sync", "", `"default_branch":"updated"`, 200},
+		{"POST", "/repo/refresh-metadata", "", `"default_branch":"updated"`, 200},
 		{"DELETE", "/repo", "", "", 204},
 	} {
 		t.Run(tc.method+" "+tc.suffix, func(t *testing.T) {
@@ -180,7 +180,7 @@ func TestRepositoryHandlerErrorMessages(t *testing.T) {
 			engine := gin.New()
 			NewRepositoryHandler(service, slog.New(slog.NewTextHandler(io.Discard, nil))).Register(engine.Group("/api/v1"))
 			w := httptest.NewRecorder()
-			engine.ServeHTTP(w, httptest.NewRequest("POST", "/api/v1/projects/project/repositories/repo/sync", nil))
+			engine.ServeHTTP(w, httptest.NewRequest("POST", "/api/v1/projects/project/repositories/repo/refresh-metadata", nil))
 			var response map[string]string
 			if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil || w.Code != tc.status || response["error"] != tc.message {
 				t.Fatalf("unexpected response %d %s", w.Code, w.Body)

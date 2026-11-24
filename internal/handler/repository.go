@@ -40,7 +40,7 @@ func (h *RepositoryHandler) Register(group *gin.RouterGroup) {
 	repos.GET("", h.list)
 	repos.GET("/:repoId", h.get)
 	repos.PATCH("/:repoId", h.patch)
-	repos.POST("/:repoId/sync", h.sync)
+	repos.POST("/:repoId/refresh-metadata", h.sync)
 	repos.DELETE("/:repoId", h.delete)
 }
 

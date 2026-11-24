@@ -47,7 +47,7 @@ func (s *LocalSource) allowedGitDir(raw []byte) (string, error) {
 }
 
 func (s *LocalSource) Prepare(ctx context.Context, spec SourceSpec) (*PreparedRepo, error) {
-	ref, err := scanRef(spec.Ref)
+	ref, err := NormalizeRef(spec.Ref)
 	if err != nil {
 		return nil, err
 	}

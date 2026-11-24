@@ -95,12 +95,13 @@ func TestRepositoryRoutes(t *testing.T) {
 		Projects:     handler.NewProjectHandler(nil, log),
 		Repositories: handler.NewRepositoryHandler(nil, log),
 		Snapshots:    handler.NewSnapshotHandler(nil, log),
+		Jobs:         handler.NewJobHandler(nil, log),
 	})
 	base := "/api/v1/projects/:id/repositories"
 	scoped := base + "/:repoId"
 	want := map[string]bool{
 		"POST " + base: true, "GET " + base: true, "GET " + base + "/:repoId": true,
-		"PATCH " + scoped: true, "POST " + scoped + "/sync": true, "DELETE " + scoped: true,
+		"PATCH " + scoped: true, "POST " + scoped + "/refresh-metadata": true, "POST " + scoped + "/sync": true, "DELETE " + scoped: true,
 		"GET " + scoped + "/snapshots": true, "GET " + scoped + "/snapshots/active": true,
 		"GET " + scoped + "/files": true, "GET " + scoped + "/files/content": true,
 	}

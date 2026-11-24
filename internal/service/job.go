@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"projectlens/internal/gitscan"
 	"reflect"
 	"regexp"
 	"strings"
@@ -20,6 +21,7 @@ import (
 )
 
 type JobStore interface {
+	CreateSync(context.Context, domain.Job, domain.SyncTarget) (domain.Job, bool, error)
 	Create(context.Context, domain.Job) (domain.Job, error)
 	GetByID(context.Context, uuid.UUID) (domain.Job, error)
 	GetByIdempotencyKey(context.Context, string) (domain.Job, error)
@@ -77,6 +79,21 @@ func (s *JobService) Enqueue(ctx context.Context, input domain.CreateJobInput) (
 			return empty, false, fmt.Errorf("%w: run_at must be a nonzero timestamp in years 1 through 9999", domain.ErrInvalidInput)
 		}
 		job.RunAt = input.RunAt.UTC()
+	}
+	if job.Type == "repository.sync" {
+		var target domain.SyncTarget
+		decoder := json.NewDecoder(bytes.NewReader(payload))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&target) != nil || target.RepositoryID == uuid.Nil || target.ProjectID == uuid.Nil {
+			return empty, false, fmt.Errorf("%w: expected project_id, repository_id and optional ref", domain.ErrInvalidInput)
+		}
+		ref, err := gitscan.NormalizeRef(target.Ref)
+		if err != nil {
+			return empty, false, err
+		}
+		target.Ref = ref
+		job.Payload, _ = json.Marshal(target)
+		return s.store.CreateSync(ctx, job, target)
 	}
 	created, err := s.store.Create(ctx, job)
 	if !errors.Is(err, domain.ErrDuplicateJobKey) || input.IdempotencyKey == nil {

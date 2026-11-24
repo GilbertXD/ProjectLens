@@ -215,3 +215,57 @@ func (s *PostgresJobStore) ReclaimExpiredLeases(ctx context.Context, batchSize i
             `+clearJobLease+" WHERE id IN (SELECT id FROM expired)", int64(batchSize), jobInterval(delay))
 	return tag.RowsAffected(), err
 }
+
+func (s *PostgresJobStore) CreateSync(ctx context.Context, job domain.Job, target domain.SyncTarget) (out domain.Job, created bool, err error) {
+	err = db.NewPgxTxManager(s.pool).WithinTx(ctx, func(ctx context.Context) error {
+		conn := db.ConnFromContext(ctx, s.pool)
+		var source string
+		err := conn.QueryRow(ctx, "SELECT source_type FROM repositories WHERE id=$1 AND project_id=$2 FOR UPDATE", target.RepositoryID, target.ProjectID).Scan(&source)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: repository not found", domain.ErrNotFound)
+		}
+		if err != nil {
+			return err
+		}
+		if job.IdempotencyKey != nil {
+			existing, e := s.GetByIdempotencyKey(ctx, *job.IdempotencyKey)
+			if e == nil {
+				return matchSync(existing, job, target, &out)
+			}
+			if !errors.Is(e, domain.ErrNotFound) {
+				return e
+			}
+		}
+		existing, e := scanJob(conn.QueryRow(ctx, "SELECT "+jobColumns+" FROM jobs WHERE type=$1 AND lower(payload->>'repository_id')=$2 AND status IN ('pending','running') ORDER BY created_at LIMIT 1", job.Type, target.RepositoryID.String()))
+		if e == nil {
+			if job.IdempotencyKey != nil && (existing.IdempotencyKey == nil || *existing.IdempotencyKey != *job.IdempotencyKey) {
+				return fmt.Errorf("%w: an active sync already owns this target; use its job or the scoped sync endpoint", domain.ErrConflict)
+			}
+			return matchSync(existing, job, target, &out)
+		}
+		if !errors.Is(e, domain.ErrNotFound) {
+			return e
+		}
+		out, e = s.Create(ctx, job)
+		if errors.Is(e, domain.ErrDuplicateJobKey) {
+			return fmt.Errorf("%w: idempotency key already used", domain.ErrConflict)
+		}
+		created = e == nil
+		return e
+	})
+	return
+}
+func matchSync(existing, requested domain.Job, target domain.SyncTarget, out *domain.Job) error {
+	var active domain.SyncTarget
+	if json.Unmarshal(existing.Payload, &active) != nil {
+		return domain.ErrConflict
+	}
+	if active.Ref == "" {
+		active.Ref = "HEAD"
+	}
+	if existing.Type != requested.Type || active != target {
+		return fmt.Errorf("%w: active job or idempotency key has a different target", domain.ErrConflict)
+	}
+	*out = existing
+	return nil
+}

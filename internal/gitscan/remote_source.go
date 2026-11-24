@@ -63,7 +63,7 @@ func (s *RemoteSource) Prepare(ctx context.Context, spec SourceSpec) (*PreparedR
 	if err != nil {
 		return nil, err
 	}
-	ref, err := scanRef(spec.Ref)
+	ref, err := NormalizeRef(spec.Ref)
 	if err != nil {
 		return nil, err
 	}

@@ -62,3 +62,9 @@ type JobListResult struct {
 	Limit  int   `json:"limit"`
 	Offset int   `json:"offset"`
 }
+
+type SyncTarget struct {
+	ProjectID    uuid.UUID `json:"project_id"`
+	RepositoryID uuid.UUID `json:"repository_id"`
+	Ref          string    `json:"ref"`
+}

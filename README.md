@@ -149,7 +149,8 @@ A project can associate local Git working trees and public GitHub repositories. 
 | GET | `/repositories` | List repositories with optional `source_type`, `limit` (default 20, maximum 100), and `offset` (default 0) |
 | GET | `/repositories/:repoId` | Get repository metadata |
 | PATCH | `/repositories/:repoId` | Update `name`, `description`, or both |
-| POST | `/repositories/:repoId/sync` | Refresh source metadata and set `last_synced_at`, preserving the name and description |
+| POST | `/repositories/:repoId/sync` | Queue a snapshot (optional JSON `{"ref":"main"}`). Poll the returned `poll_url`. Same active ref returns 200, conflicting ref returns 409. |
+| POST | `/repositories/:repoId/refresh-metadata` | Refresh source metadata and set `last_synced_at`, preserving the name and description |
 | DELETE | `/repositories/:repoId` | Remove the association and return 204 |
 
 POST takes a `source_type` of `local_git` or `github`, a `source`, and optional `name` and `description`. For GitHub, use a public repository URL such as `https://github.com/owner/repo`. For local Git, use an absolute path to the root of a readable working tree. The server needs Git installed and access to the path. In Docker Compose, bind-mount the repositories and set the allowed roots to their paths inside the container. Local associations are forbidden by default.

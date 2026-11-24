@@ -147,13 +147,13 @@ func TestRepositoryLifecycle(t *testing.T) {
 		t.Fatalf("unexpected patch: %+v", got)
 	}
 	stars.Store(3)
-	request(t, srv, "POST", ghPath+"/sync", "", 200, &got)
+	request(t, srv, "POST", ghPath+"/refresh-metadata", "", 200, &got)
 	if got.GitHubStars == nil || *got.GitHubStars != 3 || got.LastSyncedAt == nil ||
 		got.Name != "Custom" || got.Description != "Notes" {
 		t.Fatalf("unexpected GitHub sync: %+v", got)
 	}
 	git("symbolic-ref", "HEAD", "refs/heads/next")
-	request(t, srv, "POST", base+"/"+local.ID.String()+"/sync", "", 200, &got)
+	request(t, srv, "POST", base+"/"+local.ID.String()+"/refresh-metadata", "", 200, &got)
 	if got.DefaultBranch != "next" || got.LastSyncedAt == nil {
 		t.Fatalf("unexpected local sync: %+v", got)
 	}
