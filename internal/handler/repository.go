@@ -159,6 +159,7 @@ func (h *RepositoryHandler) writeError(c *gin.Context, err error) {
 		{domain.ErrForbidden, http.StatusForbidden, "forbidden"},
 		{domain.ErrNotFound, http.StatusNotFound, "not_found"},
 		{domain.ErrConflict, http.StatusConflict, "conflict"},
+		{domain.ErrPayloadTooLarge, http.StatusRequestEntityTooLarge, "payload_too_large"},
 		{domain.ErrRateLimited, http.StatusTooManyRequests, "rate_limited"},
 		{domain.ErrUpstreamUnavailable, http.StatusBadGateway, "upstream_error"},
 	} {

@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -250,5 +252,172 @@ func TestRemoteErrorRateLimited(t *testing.T) {
 		if !errors.Is(err, domain.ErrRateLimited) {
 			t.Errorf("remoteError for %q = %v, want ErrRateLimited", diagnostic, err)
 		}
+	}
+}
+
+func TestHistoricalRemoteCache(t *testing.T) {
+	ctx := t.Context()
+	dir := newFixture(t)
+	writeFixture(t, dir, "file.txt", "base\n", 0644)
+	fixtureGit(t, dir, "add", ".")
+	first := saveFixture(t, dir)
+	writeFixture(t, dir, "file.txt", "base\nnew\n", 0644)
+	fixtureGit(t, dir, "add", ".")
+	tip := saveFixture(t, dir, first)
+	fixtureGit(t, dir, "tag", "-a", "v1", "-m", "release", first)
+	tagOID := fixtureGit(t, dir, "rev-parse", "refs/tags/v1")
+
+	// Use real Git's shallow fetch protocol over a fixture path. Simulate
+	// transport failures and unadvertised-object restrictions in the shim.
+	shim := t.TempDir()
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const script = `#!/bin/sh
+prev=
+depth=
+for arg do
+	case "$arg" in
+		--git-dir=*) gitdir=$arg ;;
+		fetch) operation=fetch ;;
+		ls-remote) operation=ls-remote ;;
+		--depth=*) depth=$arg ;;
+	esac
+	prev=$arg
+done
+ref=$prev
+case "$operation" in
+	fetch|ls-remote)
+		printf '%s %s %s\n' "$operation" "$depth" "$ref" >> "$PROJECTLENS_TEST_REQUESTS"
+		case "$PROJECTLENS_TEST_REMOTE_STATE" in
+			offline) echo "Failed to connect" >&2; exit 128 ;;
+			limited) echo "HTTP 429" >&2; exit 128 ;;
+		esac ;;
+esac
+if [ "$operation" = fetch ]; then
+	if [ "${#ref}" -eq 40 ] && [ "$ref" != "$PROJECTLENS_TEST_TIP" ]; then
+		echo "not our ref" >&2
+		exit 128
+	fi
+	export GIT_ALLOW_PROTOCOL=file
+	exec "$PROJECTLENS_TEST_GIT" "$gitdir" fetch --no-tags "$depth" -- "file://$PROJECTLENS_TEST_REMOTE" "$ref"
+fi
+if [ "$operation" = ls-remote ]; then
+	export GIT_ALLOW_PROTOCOL=file
+	exec "$PROJECTLENS_TEST_GIT" ls-remote --symref -- "file://$PROJECTLENS_TEST_REMOTE" HEAD 'refs/heads/*' 'refs/tags/*'
+fi
+exec "$PROJECTLENS_TEST_GIT" "$@"
+`
+	requestFile := filepath.Join(shim, "requests")
+	if err := os.WriteFile(filepath.Join(shim, "git"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PROJECTLENS_TEST_GIT", git)
+	t.Setenv("PROJECTLENS_TEST_REMOTE", dir)
+	t.Setenv("PROJECTLENS_TEST_TIP", tip)
+	t.Setenv("PROJECTLENS_TEST_REQUESTS", requestFile)
+	t.Setenv("PATH", shim+string(os.PathListSeparator)+os.Getenv("PATH"))
+	requests := func() string {
+		t.Helper()
+		raw, err := os.ReadFile(requestFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	cfg := config.DefaultScannerConfig()
+	cfg.CacheDir = t.TempDir()
+	s := NewScanner(cfg, config.RepositoryConfig{}, config.GitHubConfig{Token: "test"})
+	spec := SourceSpec{SourceType: domain.RepositorySourceGitHub, Source: "https://github.com/owner/project"}
+	file, err := s.FileAtCommit(ctx, spec, tip, "file.txt")
+	if err != nil || file.Content != "base\nnew\n" || !strings.Contains(requests(), "--depth=1 "+tip) {
+		t.Fatalf("cold pinned file = %+v, %v", file, err)
+	}
+	before := requests()
+	t.Setenv("PROJECTLENS_TEST_REMOTE_STATE", "offline")
+	if tree, err := s.TreeAtCommit(ctx, spec, tip, "", 20, 0); err != nil || tree.Total != 1 {
+		t.Fatalf("cached tree = %+v, %v", tree, err)
+	}
+	if warm, err := s.FileAtCommit(ctx, spec, tip, "file.txt"); err != nil || warm != file || before != requests() {
+		t.Fatalf("cached file = %+v, %v, requests=%q", warm, err, requests())
+	}
+	if _, err := s.FileAtCommit(ctx, spec, first, "file.txt"); !errors.Is(err, domain.ErrUpstreamUnavailable) {
+		t.Fatalf("missing commit with offline remote = %v", err)
+	}
+	if _, err := s.FileHistory(ctx, spec, tip, "file.txt", true, 20, 0); !errors.Is(err, domain.ErrUpstreamUnavailable) {
+		t.Fatalf("shallow history with offline remote = %v", err)
+	}
+	if _, err := s.Blame(ctx, spec, tip, "file.txt", 0, 0); !errors.Is(err, domain.ErrUpstreamUnavailable) {
+		t.Fatalf("shallow blame with offline remote = %v", err)
+	}
+	t.Setenv("PROJECTLENS_TEST_REMOTE_STATE", "limited")
+	if _, err := s.FileAtCommit(ctx, spec, first, "file.txt"); !errors.Is(err, domain.ErrRateLimited) {
+		t.Fatalf("remote rate limit = %v", err)
+	}
+	t.Setenv("PROJECTLENS_TEST_REMOTE_STATE", "")
+	history, err := s.FileHistory(ctx, spec, tip, "file.txt", true, 20, 0)
+	if err != nil || !history.HistoryComplete || history.Shallow || len(history.Items) != 2 || history.Items[1].Hash != first ||
+		history.Items[1].URL != spec.Source+"/commit/"+first ||
+		!strings.Contains(requests(), "--depth="+strconv.Itoa(HistoryLimit+2)+" "+tip) {
+		t.Fatalf("deepened history = %+v, %v", history, err)
+	}
+	refs, err := s.ListRefs(ctx, spec, "tag", 20, 0)
+	if err != nil || refs.DefaultBranch != "main" || refs.Total != 1 || refs.Items[0].ObjectHash != tagOID || refs.Items[0].CommitHash != first {
+		t.Fatalf("remote refs = %+v, %v", refs, err)
+	}
+	before = requests()
+	t.Setenv("PROJECTLENS_TEST_REMOTE_STATE", "offline")
+	blame, err := s.Blame(ctx, spec, tip, "file.txt", 0, 0)
+	if err != nil || blame.Shallow || len(blame.Lines) != 2 || blame.Lines[0].CommitHash != first || before != requests() {
+		t.Fatalf("cached blame after deepening = %+v, %v", blame, err)
+	}
+	t.Setenv("PROJECTLENS_TEST_REMOTE_STATE", "")
+	cfg.CacheDir = t.TempDir()
+	s = NewScanner(cfg, config.RepositoryConfig{}, config.GitHubConfig{})
+	old, err := s.FileAtCommit(ctx, spec, first, "file.txt")
+	if err != nil || old.Content != "base\n" || !strings.Contains(requests(), "--depth="+strconv.Itoa(HistoryLimit+2)+" HEAD") {
+		t.Fatalf("unadvertised commit fallback = %+v, %v", old, err)
+	}
+	if _, err := s.TreeAtCommit(ctx, spec, strings.Repeat("0", 40), "", 20, 0); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing commit after successful fallback = %v", err)
+	}
+}
+
+func TestHistoricalShallowBoundaries(t *testing.T) {
+	dir := newFixture(t)
+	writeFixture(t, dir, "file", "initial\n", 0644)
+	fixtureGit(t, dir, "add", ".")
+	first := saveFixture(t, dir)
+	writeFixture(t, dir, "file", "initial\nnew\n", 0644)
+	fixtureGit(t, dir, "add", ".")
+	tip := saveFixture(t, dir, first)
+	root := t.TempDir()
+	shallow := filepath.Join(root, "shallow")
+	fixtureGit(t, dir, "clone", "--depth=1", "--", "file://"+dir, shallow)
+	s := localScanner(root, config.DefaultScannerConfig())
+	spec := SourceSpec{SourceType: domain.RepositorySourceLocalGit, Source: shallow}
+	page, err := s.History(t.Context(), spec, HistoryPage, func(ids []string) (map[string]bool, error) {
+		return map[string]bool{tip: true}, nil
+	}, func(commit HistoryCommit, changes Changes) error {
+		if commit.Hash != tip || !reflect.DeepEqual(commit.Parents, []string{first}) ||
+			!changes.ParentUnavailable || !changes.Truncated || len(changes.Files) != 0 {
+			t.Fatalf("shallow import = %+v, %+v", commit, changes)
+		}
+		return nil
+	})
+	if err != nil || page.Imported != 1 || page.ReachableCount != 1 || !page.HasMore ||
+		page.Complete || !page.Truncated || page.WindowStatus != "partial" {
+		t.Fatalf("shallow import window = %+v, %v", page, err)
+	}
+	history, err := s.FileHistory(t.Context(), spec, tip, "file", true, 20, 0)
+	if err != nil || !history.Shallow || !history.Truncated || history.HistoryComplete ||
+		len(history.Items) != 1 || !reflect.DeepEqual(history.Items[0].Parents, []string{first}) {
+		t.Fatalf("shallow file history = %+v, %v", history, err)
+	}
+	blame, err := s.Blame(t.Context(), spec, tip, "file", 2, 2)
+	if err != nil || !blame.Shallow || !blame.BoundaryReached || blame.HistoryComplete ||
+		len(blame.Lines) != 1 || !blame.Lines[0].Boundary || blame.Lines[0].CommitHash != tip {
+		t.Fatalf("shallow blame = %+v, %v", blame, err)
 	}
 }

@@ -505,9 +505,13 @@ func TestLocalScannerIgnoresRepositoryScripts(t *testing.T) {
 		"core.alternateRefsCommand": program, "diff.external": program, "diff.textconv": program,
 		"diff.sentinel.command": program, "diff.sentinel.textconv": program,
 		"filter.sentinel.clean": program, "filter.sentinel.smudge": program, "filter.sentinel.process": program,
+		"blame.ignoreRevsFile": filepath.Join(dir, "missing-ignore-revs"),
+		"mailmap.file":         filepath.Join(dir, "custom-mailmap"),
+		"log.follow":           "true", "log.mailmap": "true",
 	} {
 		fixtureGit(t, dir, "config", key, value)
 	}
+	writeFixture(t, dir, "custom-mailmap", "Mapped Name <mapped@example.org> <scanner@example.org>\n", 0600)
 	type entry struct {
 		mode os.FileMode
 		hash [sha256.Size]byte
@@ -560,10 +564,228 @@ func TestLocalScannerIgnoresRepositoryScripts(t *testing.T) {
 	if data, err := scanner.ReadBlob(t.Context(), spec, head, blob); err != nil || string(data) != "after\n" {
 		t.Fatalf("ReadBlob = %q, %v", data, err)
 	}
+	if file, err := scanner.FileAtCommit(t.Context(), spec, base, "tracked.txt"); err != nil || file.Content != "before\n" {
+		t.Fatalf("FileAtCommit = %+v, %v", file, err)
+	}
+	if history, err := scanner.FileHistory(t.Context(), spec, head, "tracked.txt", false, 10, 0); err != nil ||
+		len(history.Items) != 2 || history.Items[0].AuthorName != "Scanner Test" {
+		t.Fatalf("FileHistory = %+v, %v", history, err)
+	}
+	if blame, err := scanner.Blame(t.Context(), spec, head, "tracked.txt", 0, 0); err != nil ||
+		len(blame.Lines) != 1 || blame.Lines[0].Content != "after" || blame.Lines[0].AuthorName != "Scanner Test" {
+		t.Fatalf("Blame = %+v, %v (%s)", blame, err, gitDiagnostic(err))
+	}
 	if _, err := os.Lstat(sentinel); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("repository script ran: %v", err)
 	}
 	if after := snapshot(); !reflect.DeepEqual(before, after) {
 		t.Fatal("scanner changed source files or Git metadata")
+	}
+}
+
+func TestHistoricalCommandAllowlist(t *testing.T) {
+	dir := "--git-dir=" + t.TempDir()
+	sha := strings.Repeat("a", 40)
+	remote := "https://github.com/owner/project.git"
+	git := gitRunner{}
+	log := func(skip, format, path string) []string {
+		return []string{dir, "log", "--no-notes", "--no-show-signature", "--encoding=UTF-8", "--follow", "-M", "-l256",
+			"--name-status", "-z", skip, "--max-count=2", format, sha, "--", path}
+	}
+	for _, args := range [][]string{
+		{"ls-remote", "--symref", "--", remote, "HEAD", "refs/heads/*", "refs/tags/*"},
+		{dir, "for-each-ref", refFormat, "refs/heads", "refs/tags"},
+		{dir, "symbolic-ref", "--quiet", "HEAD"},
+		{dir, "rev-parse", "--is-shallow-repository"},
+		{dir, "ls-tree", "-l", "-z", sha, "--", "folder/name"},
+		log("--skip=0", commitFormat, "folder/name"),
+		{dir, "blame", "--no-textconv", "--porcelain", "-L", "1,20", sha, "--", "folder/name"},
+	} {
+		if err := git.validateCommand(args); err != nil {
+			t.Errorf("%v: %v", args, err)
+		}
+	}
+	for _, args := range [][]string{
+		{"ls-remote", "--symref", "--", "file:///tmp/a", "HEAD", "refs/heads/*", "refs/tags/*"},
+		{"ls-remote", "--symref", "--", remote, "HEAD", "refs/*", "refs/tags/*"},
+		{dir, "for-each-ref", "--format=%(contents)", "refs/heads", "refs/tags"},
+		{dir, "symbolic-ref", "HEAD", "refs/heads/branch"},
+		{dir, "ls-tree", "-l", "-z", sha, "--", "nested/../file"},
+		{dir, "blame", "--textconv", "--porcelain", sha, "--", "file"},
+		{dir, "blame", "--no-textconv", "--porcelain", "--ignore-revs-file=/tmp/a", sha, "--", "file"},
+		{dir, "blame", "--no-textconv", "--porcelain", "-L", "20,1", sha, "--", "file"},
+		{dir, "blame", "--no-textconv", "--porcelain", "-L", "/pattern/,2", sha, "--", "file"},
+		{dir, "log", "--ext-diff", sha, "--", "file"},
+		{dir, "log", "--output=/tmp/a", sha, "--", "file"},
+		{dir, "rev-parse", "--git-path", "config"},
+		log("--skip=-1", commitFormat, "file"),
+		log("--skip=0", "--format=%B", "file"),
+		log("--skip=0", commitFormat, "-file"),
+		log("--skip=0", commitFormat, "folder/.Git/config"),
+		log("--skip=0", commitFormat, "file\x00"),
+		log("--skip=0", commitFormat, "file\xff"),
+	} {
+		if err := git.validateCommand(args); !errors.Is(err, domain.ErrForbidden) {
+			t.Errorf("%v: got %v, want forbidden", args, err)
+		}
+	}
+}
+
+func TestHistoricalQueries(t *testing.T) {
+	dir := newFixture(t)
+	ctx := t.Context()
+	writeFixture(t, dir, "src/old.txt", "first\nsecond\n", 0755)
+	writeFixture(t, dir, "src/[literal].txt", "literal\n", 0644)
+	writeFixture(t, dir, "src/binary", "a\x00b", 0644)
+	writeFixture(t, dir, "src/empty", "", 0644)
+	writeFixture(t, dir, "src/long", strings.Repeat("line\n", BlameLineLimit+1), 0644)
+	if err := os.Symlink("old.txt", filepath.Join(dir, "src/link")); err != nil {
+		t.Fatal(err)
+	}
+	fixtureGit(t, dir, "add", ".")
+	first := saveFixture(t, dir)
+	fixtureGit(t, dir, "mv", "src/old.txt", "src/new.txt")
+	renamed := saveFixture(t, dir, first)
+	writeFixture(t, dir, "src/new.txt", "first\nchanged", 0755)
+	fixtureGit(t, dir, "add", ".")
+	tip := saveFixture(t, dir, renamed)
+	fixtureGit(t, dir, "branch", "feature", first)
+	fixtureGit(t, dir, "tag", "-a", "v1", "-m", "release", first)
+	tagOID := fixtureGit(t, dir, "rev-parse", "refs/tags/v1")
+	fixtureGit(t, dir, "tag", "v2", tip)
+
+	scanner := localScanner(dir, config.DefaultScannerConfig())
+	spec := SourceSpec{SourceType: domain.RepositorySourceLocalGit, Source: dir}
+	tree, err := scanner.TreeAtCommit(ctx, spec, first, "src/", 1, 4)
+	if err != nil || tree.Total != 5 || tree.PathPrefix != "src" || tree.CommitHash != first ||
+		len(tree.Items) != 1 || tree.Items[0].Path != "src/old.txt" || !tree.Items[0].IsExecutable {
+		t.Fatalf("tree = %+v, %v", tree, err)
+	}
+	file, err := scanner.FileAtCommit(ctx, spec, first, "src/old.txt")
+	if err != nil || file.Content != "first\nsecond\n" || file.LineCount != 2 || file.SHA256 == "" || file.Binary {
+		t.Fatalf("file = %+v, %v", file, err)
+	}
+	binary, err := scanner.FileAtCommit(ctx, spec, tip, "src/binary")
+	if err != nil || !binary.Binary || binary.Content != "" || binary.LineCount != 0 {
+		t.Fatalf("binary file = %+v, %v", binary, err)
+	}
+	literal, err := scanner.FileAtCommit(ctx, spec, tip, "src/[literal].txt")
+	if err != nil || literal.Content != "literal\n" {
+		t.Fatalf("literal path = %+v, %v", literal, err)
+	}
+	for _, tc := range []struct {
+		sha, path string
+		want      error
+	}{
+		{first, "src/new.txt", domain.ErrNotFound},
+		{first, "src", domain.ErrNotFound},
+		{first, "src/link", domain.ErrInvalidInput},
+		{strings.Repeat("0", 40), "src/old.txt", domain.ErrNotFound},
+		{first, "src/.GIT/config", domain.ErrInvalidInput},
+	} {
+		if _, err := scanner.FileAtCommit(ctx, spec, tc.sha, tc.path); !errors.Is(err, tc.want) {
+			t.Errorf("file %s at %s: %v, want %v", tc.path, tc.sha, err, tc.want)
+		}
+	}
+	page, err := scanner.FileHistory(ctx, spec, tip, "src/new.txt", true, 2, 0)
+	if err != nil || !page.HasMore || !page.Truncated || page.HistoryComplete ||
+		len(page.Items) != 2 || page.Items[0].Hash != tip || page.Items[1].Hash != renamed ||
+		page.Items[1].ChangeType != "R" || page.Items[1].OldPath != "src/old.txt" {
+		t.Fatalf("file history = %+v, %v", page, err)
+	}
+	last, err := scanner.FileHistory(ctx, spec, tip, "src/new.txt", true, 2, 2)
+	if err != nil || !last.HistoryComplete || len(last.Items) != 1 || last.Items[0].Hash != first || last.Items[0].Path != "src/old.txt" {
+		t.Fatalf("file history second page = %+v, %v", last, err)
+	}
+	noFollow, err := scanner.FileHistory(ctx, spec, tip, "src/new.txt", false, 10, 0)
+	if err != nil || len(noFollow.Items) != 2 || noFollow.Items[1].Hash != renamed || noFollow.Items[1].OldPath != "" {
+		t.Fatalf("file history without following = %+v, %v", noFollow, err)
+	}
+	if _, err := scanner.FileHistory(ctx, spec, tip, "missing", true, 10, 0); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing file history: %v", err)
+	}
+	blame, err := scanner.Blame(ctx, spec, tip, "src/new.txt", 1, 2)
+	if err != nil || blame.TotalLines != 2 || len(blame.Lines) != 2 || blame.Lines[0].CommitHash != first ||
+		blame.Lines[0].Filename != "src/old.txt" || blame.Lines[0].AuthorEmail != "scanner@example.org" ||
+		blame.Lines[1].CommitHash != tip || blame.Lines[1].Content != "changed" {
+		t.Fatalf("blame = %+v, %v", blame, err)
+	}
+	empty, err := scanner.Blame(ctx, spec, tip, "src/empty", 0, 0)
+	if err != nil || empty.Lines == nil || len(empty.Lines) != 0 || empty.TotalLines != 0 {
+		t.Fatalf("empty blame = %+v, %v", empty, err)
+	}
+	long, err := scanner.Blame(ctx, spec, tip, "src/long", 0, 0)
+	if err != nil || len(long.Lines) != BlameLineLimit || long.TotalLines != BlameLineLimit+1 || !long.Truncated ||
+		long.Lines[BlameLineLimit-1].OriginalLine != BlameLineLimit || long.Lines[BlameLineLimit-1].Content != "line" {
+		t.Fatalf("long blame: %d/%d lines, truncated=%v, err=%v", len(long.Lines), long.TotalLines, long.Truncated, err)
+	}
+	if _, err := scanner.Blame(ctx, spec, tip, "src/binary", 0, 0); !errors.Is(err, domain.ErrInvalidInput) {
+		t.Fatalf("binary blame: %v", err)
+	}
+	if _, err := scanner.Blame(ctx, spec, tip, "src/new.txt", 3, 4); !errors.Is(err, domain.ErrInvalidInput) {
+		t.Fatalf("line out of range: %v", err)
+	}
+	scanner.cfg.MaxFileSize = 10
+	if _, err := scanner.Blame(ctx, spec, tip, "src/new.txt", 0, 0); !errors.Is(err, domain.ErrPayloadTooLarge) {
+		t.Fatalf("oversize blame: %v", err)
+	}
+	if _, err := scanner.FileAtCommit(ctx, spec, tip, "src/new.txt"); !errors.Is(err, domain.ErrPayloadTooLarge) {
+		t.Fatalf("oversize file: %v", err)
+	}
+	refs, err := scanner.ListRefs(ctx, spec, "", 2, 1)
+	if err != nil || refs.DefaultBranch != "main" || refs.Total != 4 || len(refs.Items) != 2 ||
+		refs.Items[0].Name != "main" || refs.Items[1].Name != "v1" ||
+		refs.Items[1].ObjectHash != tagOID || refs.Items[1].CommitHash != first {
+		t.Fatalf("refs = %+v, %v", refs, err)
+	}
+}
+
+func TestHistoryWindowStatuses(t *testing.T) {
+	for _, tc := range []struct {
+		reachable int
+		hasMore   bool
+		status    string
+	}{
+		{1, false, "complete"},
+		{HistoryPage, true, "partial"},
+		{HistoryLimit, false, "complete"},
+		{HistoryLimit, true, "window_limit_reached"},
+	} {
+		got := DescribeHistoryWindow(tc.reachable, tc.hasMore)
+		if got.WindowStatus != tc.status || got.Complete == tc.hasMore || got.Truncated != tc.hasMore ||
+			got.WindowLimit != HistoryLimit || got.PageSize != HistoryPage || got.WindowLimitReached != (tc.status == "window_limit_reached") {
+			t.Errorf("DescribeHistoryWindow(%d, %v) = %+v", tc.reachable, tc.hasMore, got)
+		}
+	}
+}
+
+func TestHistoryImportWindowCap(t *testing.T) {
+	dir := newFixture(t)
+	var commits strings.Builder
+	for i := 1; i <= HistoryLimit+1; i++ {
+		fmt.Fprintf(&commits, "commit refs/heads/main\nmark :%d\ncommitter Fixture <test@example.org> %d +0000\ndata 1\nx\n", i, 1700000000+i)
+		if i > 1 {
+			fmt.Fprintf(&commits, "from :%d\n", i-1)
+		}
+		commits.WriteByte('\n')
+	}
+	cmd := exec.CommandContext(t.Context(), "git", "-C", dir, "fast-import", "--quiet")
+	cmd.Stdin = strings.NewReader(commits.String())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf(" fast-import: %v: %s", err, out)
+	}
+
+	s := localScanner(dir, config.DefaultScannerConfig())
+	spec := SourceSpec{SourceType: domain.RepositorySourceLocalGit, Source: dir}
+	result, err := s.History(t.Context(), spec, HistoryLimit+HistoryPage, func(ids []string) (map[string]bool, error) {
+		return nil, nil // The import has already stored every commit in the window.
+	}, func(HistoryCommit, Changes) error {
+		t.Fatal("an existing commit was imported twice")
+		return nil
+	})
+	if err != nil || len(result.Reachable) != HistoryLimit || result.ReachableCount != HistoryLimit ||
+		result.Imported != 0 || !result.HasMore || result.Complete || !result.Truncated ||
+		!result.WindowLimitReached || result.WindowStatus != "window_limit_reached" {
+		t.Fatalf("window = %+v, imported = %d, reachable = %d, err = %v", result.HistoryWindow, result.Imported, result.ReachableCount, err)
 	}
 }

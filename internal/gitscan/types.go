@@ -7,11 +7,14 @@ import (
 )
 
 type SourceSpec struct {
-	depth       int
-	compareBase string
-	SourceType  domain.RepositorySourceType
-	Source      string
-	Ref         string
+	depth         int
+	compareBase   string
+	requireCommit bool
+	preferCache   bool
+	deepenHistory bool
+	SourceType    domain.RepositorySourceType
+	Source        string
+	Ref           string
 }
 
 type PreparedRepo struct {
@@ -19,8 +22,10 @@ type PreparedRepo struct {
 	Source          string
 	CanonicalSource string
 	GitDir          string
+	CommonDir       string
 	PinnedCommit    string
 	ResolvedRef     string
+	Shallow         bool
 	Release         func()
 }
 

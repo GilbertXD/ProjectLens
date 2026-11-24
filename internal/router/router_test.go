@@ -95,6 +95,7 @@ func TestRepositoryRoutes(t *testing.T) {
 		Projects:     handler.NewProjectHandler(nil, log),
 		Repositories: handler.NewRepositoryHandler(nil, log),
 		Snapshots:    handler.NewSnapshotHandler(nil, log),
+		History:      &handler.HistoryHandler{Log: log},
 		Jobs:         handler.NewJobHandler(nil, log),
 	})
 	base := "/api/v1/projects/:id/repositories"
@@ -104,6 +105,8 @@ func TestRepositoryRoutes(t *testing.T) {
 		"PATCH " + scoped: true, "POST " + scoped + "/refresh-metadata": true, "POST " + scoped + "/sync": true, "DELETE " + scoped: true,
 		"GET " + scoped + "/snapshots": true, "GET " + scoped + "/snapshots/active": true,
 		"GET " + scoped + "/files": true, "GET " + scoped + "/files/content": true,
+		"GET " + scoped + "/commits/:sha/tree": true, "GET " + scoped + "/commits/:sha/file": true,
+		"GET " + scoped + "/files/history": true, "GET " + scoped + "/files/blame": true, "GET " + scoped + "/refs": true,
 	}
 	for _, route := range engine.Routes() {
 		delete(want, route.Method+" "+route.Path)

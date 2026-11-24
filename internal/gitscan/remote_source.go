@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -59,8 +60,29 @@ func lockCache(ctx context.Context, path string) (func(), error) {
 	}
 }
 
+func (s *RemoteSource) endpoint(source string) (canonical, cloneURL string, git gitRunner, err error) {
+	owner, name, _, err := github.ParsePublicRepoURL(source)
+	if err != nil {
+		return "", "", git, err
+	}
+	repoPath := "/" + strings.ToLower(owner+"/"+name)
+	canonical = "https://github.com" + repoPath
+	cloneURL = canonical + ".git"
+	git = gitRunner{token: s.token}
+	if s.gitBaseURL != "" {
+		base, err := url.Parse(s.gitBaseURL)
+		if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Hostname() == "" {
+			return "", "", git, errors.New("invalid Git mirror base URL")
+		}
+		cloneURL = base.JoinPath(repoPath + ".git").String()
+		// GitHub credentials are scoped to github.com. Mirrors receive no token.
+		git = gitRunner{allowHTTP: base.Scheme == "http"}
+	}
+	return canonical, cloneURL, git, nil
+}
+
 func (s *RemoteSource) Prepare(ctx context.Context, spec SourceSpec) (*PreparedRepo, error) {
-	owner, name, _, err := github.ParsePublicRepoURL(spec.Source)
+	canonical, cloneURL, git, err := s.endpoint(spec.Source)
 	if err != nil {
 		return nil, err
 	}
@@ -68,18 +90,8 @@ func (s *RemoteSource) Prepare(ctx context.Context, spec SourceSpec) (*PreparedR
 	if err != nil {
 		return nil, err
 	}
-	repoPath := "/" + strings.ToLower(owner+"/"+name)
-	canonical := "https://github.com" + repoPath
-	cloneURL := canonical + ".git"
-	git := gitRunner{token: s.token}
-	if s.gitBaseURL != "" {
-		base, err := url.Parse(s.gitBaseURL)
-		if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Hostname() == "" {
-			return nil, errors.New("invalid Git mirror base URL")
-		}
-		cloneURL = base.JoinPath(repoPath + ".git").String()
-		// GitHub credentials are scoped to github.com. Mirrors receive no token.
-		git = gitRunner{allowHTTP: base.Scheme == "http"}
+	if spec.requireCommit && !validOID(ref) {
+		return nil, fmt.Errorf("%w: expected a full commit SHA", domain.ErrInvalidInput)
 	}
 	if err := os.MkdirAll(s.cacheDir, 0700); err != nil {
 		return nil, err
@@ -130,22 +142,43 @@ func (s *RemoteSource) Prepare(ctx context.Context, spec SourceSpec) (*PreparedR
 		return nil, err
 	case !info.IsDir():
 		return nil, errors.New("Git cache entry is not a directory")
-	case spec.compareBase != "":
-		// A comparison may resolve both commits without going through fetch.
+	case spec.compareBase != "" || spec.preferCache:
 		if err := validateCacheTree(dir); err != nil {
 			return nil, err
 		}
 	}
 
-	// Credentials may grant private access. Verify public visibility without them.
-	if git.token != "" {
-		if _, err := git.run(ctx, 8192, false, "ls-remote", "--", cloneURL, "HEAD"); err != nil {
-			return nil, remoteError(err)
+	var oid string
+	if spec.preferCache && validOID(ref) && fetchDir == dir {
+		resolved, err := git.resolve(ctx, dir, ref)
+		var exit *exec.ExitError
+		if err != nil && !errors.As(err, &exit) {
+			return nil, err
+		}
+		if resolved == ref {
+			shallow, err := git.isShallow(ctx, dir)
+			if err != nil {
+				return nil, err
+			}
+			if !spec.deepenHistory || !shallow {
+				success = true
+				return &PreparedRepo{
+					SourceType: domain.RepositorySourceGitHub, Source: spec.Source, CanonicalSource: canonical,
+					GitDir: dir, PinnedCommit: ref, ResolvedRef: ref, Shallow: shallow, Release: release,
+				}, nil
+			}
 		}
 	}
-	var oid string
+	if err := checkPublicRemote(ctx, git, cloneURL); err != nil {
+		return nil, err
+	}
 	if spec.compareBase != "" {
 		oid, err = prepareCompare(ctx, git, fetchDir, cloneURL, ref, spec.compareBase)
+		if err != nil {
+			return nil, err
+		}
+	} else if spec.preferCache {
+		oid, err = prepareHistoricalCommit(ctx, git, fetchDir, cloneURL, ref, spec.deepenHistory)
 		if err != nil {
 			return nil, err
 		}
@@ -161,6 +194,10 @@ func (s *RemoteSource) Prepare(ctx context.Context, spec SourceSpec) (*PreparedR
 			return nil, fmt.Errorf("%w: fetched ref does not resolve to a commit", domain.ErrInvalidInput)
 		}
 	}
+	shallow, err := git.isShallow(ctx, fetchDir)
+	if err != nil {
+		return nil, err
+	}
 	if fetchDir != dir {
 		if err := os.Rename(fetchDir, dir); err != nil {
 			return nil, err
@@ -169,8 +206,105 @@ func (s *RemoteSource) Prepare(ctx context.Context, spec SourceSpec) (*PreparedR
 	success = true
 	return &PreparedRepo{
 		SourceType: domain.RepositorySourceGitHub, Source: spec.Source, CanonicalSource: canonical,
-		GitDir: dir, PinnedCommit: oid, ResolvedRef: ref, Release: release,
+		GitDir: dir, PinnedCommit: oid, ResolvedRef: ref, Shallow: shallow, Release: release,
 	}, nil
+}
+
+func checkPublicRemote(ctx context.Context, git gitRunner, cloneURL string) error {
+	// Credentials may grant private access. Verify public visibility without them.
+	if git.token == "" {
+		return nil
+	}
+	_, err := git.run(ctx, 8192, false, "ls-remote", "--", cloneURL, "HEAD")
+	return remoteError(err)
+}
+
+func prepareHistoricalCommit(ctx context.Context, git gitRunner, dir, cloneURL, ref string, deepen bool) (string, error) {
+	depth := 1
+	if deepen {
+		depth = HistoryLimit + 2
+	}
+	pinned := validOID(ref)
+	fetchErr := fetchAtDepth(ctx, git, dir, cloneURL, ref, depth)
+	err := remoteError(fetchErr)
+	switch {
+	case pinned && (unsupportedShallowFetch(fetchErr) || errors.Is(err, domain.ErrInvalidInput)):
+		err = fetchCommit(ctx, git, dir, cloneURL, "HEAD", HistoryLimit+2)
+	case !pinned && unsupportedShallowFetch(fetchErr):
+		err = fetchWithoutDepth(ctx, git, dir, cloneURL, ref)
+	}
+	if errors.Is(err, domain.ErrInvalidInput) {
+		return "", fmt.Errorf("%w: remote Git ref is unavailable", domain.ErrNotFound)
+	}
+	if err != nil {
+		return "", err
+	}
+	revision := "FETCH_HEAD"
+	if pinned {
+		revision = ref
+	}
+	oid, err := git.resolve(ctx, dir, revision)
+	var exit *exec.ExitError
+	if errors.As(err, &exit) || err == nil && pinned && oid != ref {
+		return "", fmt.Errorf("%w: commit not found in repository", domain.ErrNotFound)
+	}
+	return oid, err
+}
+
+func (s *RemoteSource) ListRefs(ctx context.Context, spec SourceSpec) ([]GitRef, string, error) {
+	_, cloneURL, git, err := s.endpoint(spec.Source)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := checkPublicRemote(ctx, git, cloneURL); err != nil {
+		return nil, "", err
+	}
+	raw, err := git.run(ctx, refOutputLimit, false, "ls-remote", "--symref", "--", cloneURL, "HEAD", "refs/heads/*", "refs/tags/*")
+	if err != nil {
+		return nil, "", remoteError(err)
+	}
+	items, defaultBranch, err := parseRemoteRefs(string(raw))
+	return items, defaultBranch, remoteError(err)
+}
+
+func parseRemoteRefs(raw string) ([]GitRef, string, error) {
+	items := []GitRef{}
+	peeled := make(map[string]string)
+	var defaultBranch string
+	for row := range strings.SplitSeq(strings.TrimSuffix(raw, "\n"), "\n") {
+		if row == "" {
+			continue
+		}
+		value, ref, ok := strings.Cut(row, "\t")
+		if !ok {
+			return nil, "", errors.New("invalid remote Git ref record")
+		}
+		if target, symbolic := strings.CutPrefix(value, "ref: "); symbolic {
+			if branch, ok := strings.CutPrefix(target, "refs/heads/"); ref == "HEAD" && ok {
+				defaultBranch = branch
+			}
+			continue
+		}
+		if !validOID(value) {
+			return nil, "", errors.New("invalid remote Git ref object ID")
+		}
+		if !strings.HasPrefix(ref, "refs/heads/") && !strings.HasPrefix(ref, "refs/tags/") {
+			continue
+		}
+		if tag, ok := strings.CutSuffix(ref, "^{}"); ok && strings.HasPrefix(tag, "refs/tags/") {
+			peeled[tag] = value
+			continue
+		}
+		item := makeGitRef(ref, value)
+		item.CommitHash = value
+		items = append(items, item)
+	}
+	for i := range items {
+		if oid, ok := peeled[items[i].Ref]; ok {
+			items[i].CommitHash = oid
+		}
+	}
+	return items, defaultBranch, nil
 }
 
 func prepareCompare(ctx context.Context, git gitRunner, dir, cloneURL, head, base string) (string, error) {
@@ -201,21 +335,33 @@ func prepareCompare(ctx context.Context, git gitRunner, dir, cloneURL, head, bas
 }
 
 func fetchCommit(ctx context.Context, git gitRunner, dir, cloneURL, ref string, depth int) error {
-	args := []string{"--git-dir=" + dir, "fetch", "--no-tags", "--prune", "--no-auto-maintenance"}
-	shallow := append(append([]string(nil), args...), "--depth="+strconv.Itoa(depth), "--", cloneURL, ref)
-	_, err := git.run(ctx, 8192, true, shallow...)
+	err := fetchAtDepth(ctx, git, dir, cloneURL, ref, depth)
 	if err == nil {
 		return nil
 	}
 	detail := gitDiagnostic(err)
-	unsupportedShallow := strings.Contains(detail, "shallow") &&
-		(strings.Contains(detail, "support") || strings.Contains(detail, "capable"))
 	rejectedSpecificObject := ref != "HEAD" &&
 		(strings.Contains(detail, "unadvertised object") || strings.Contains(detail, "not our ref"))
-	if unsupportedShallow || rejectedSpecificObject {
-		_, err = git.run(ctx, 8192, true, append(args, "--", cloneURL, ref)...)
+	if unsupportedShallowFetch(err) || rejectedSpecificObject {
+		return fetchWithoutDepth(ctx, git, dir, cloneURL, ref)
 	}
 	return remoteError(err)
+}
+
+func fetchAtDepth(ctx context.Context, git gitRunner, dir, cloneURL, ref string, depth int) error {
+	_, err := git.run(ctx, 8192, true, "--git-dir="+dir, "fetch", "--no-tags", "--prune", "--no-auto-maintenance",
+		"--depth="+strconv.Itoa(depth), "--", cloneURL, ref)
+	return err
+}
+
+func fetchWithoutDepth(ctx context.Context, git gitRunner, dir, cloneURL, ref string) error {
+	_, err := git.run(ctx, 8192, true, "--git-dir="+dir, "fetch", "--no-tags", "--prune", "--no-auto-maintenance", "--", cloneURL, ref)
+	return remoteError(err)
+}
+
+func unsupportedShallowFetch(err error) bool {
+	detail := gitDiagnostic(err)
+	return strings.Contains(detail, "shallow") && (strings.Contains(detail, "support") || strings.Contains(detail, "capable"))
 }
 
 func gitDiagnostic(err error) string {

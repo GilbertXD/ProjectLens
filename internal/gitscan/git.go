@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"unicode"
+	"unicode/utf8"
 
 	"projectlens/internal/domain"
 	"projectlens/internal/gitrepo"
@@ -24,6 +26,7 @@ type gitRunner struct {
 	token     string
 	allowHTTP bool
 	cacheDir  string
+	objectDir string
 }
 
 func (g gitRunner) command(ctx context.Context, auth bool, args ...string) *exec.Cmd {
@@ -39,6 +42,10 @@ func (g gitRunner) command(ctx context.Context, auth bool, args ...string) *exec
 	// All commands use explicit Git directories, absolute init paths or URLs.
 	// Avoid picking up the application working directory's Git config.
 	cmd.Dir = "/"
+	cmd.Env = append(cmd.Env, "GIT_LITERAL_PATHSPECS=1")
+	if g.objectDir != "" && len(args) > 1 && args[1] == "blame" {
+		cmd.Env = append(cmd.Env, "GIT_OBJECT_DIRECTORY="+g.objectDir)
+	}
 	if fetch && auth && g.token != "" && !g.allowHTTP {
 		cmd.Env = append(cmd.Env, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.https://github.com/.extraHeader",
 			"GIT_CONFIG_VALUE_0=Authorization: Bearer "+g.token)
@@ -72,6 +79,10 @@ func (g gitRunner) validateCommand(args []string) error {
 		}
 	case "ls-remote":
 		if len(args) == 4 && args[1] == "--" && g.remoteURL(args[2]) && args[3] == "HEAD" {
+			return nil
+		}
+		if len(args) == 7 && args[1] == "--symref" && args[2] == "--" && g.remoteURL(args[3]) &&
+			slices.Equal(args[4:], []string{"HEAD", "refs/heads/*", "refs/tags/*"}) {
 			return nil
 		}
 	default:
@@ -169,10 +180,43 @@ func (g gitRunner) validFetch(args []string) bool {
 	return err == nil && args[2] == ref
 }
 
+const commitFormat = "--format=%H%x00%T%x00%P%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%s"
+const refFormat = "--format=%(refname)%00%(objectname)%00%(*objectname)%00%(objecttype)"
+
+func validRepoPath(path string) bool {
+	if path == "" || !utf8.ValidString(path) || path[0] == '-' ||
+		strings.ContainsRune(path, '\\') || strings.ContainsFunc(path, unicode.IsControl) {
+		return false
+	}
+	for part := range strings.SplitSeq(path, "/") {
+		if part == "" || part == "." || part == ".." || strings.EqualFold(part, ".git") {
+			return false
+		}
+	}
+	return true
+}
+
+func validGitNumber(arg, prefix string, minimum int) bool {
+	raw, ok := strings.CutPrefix(arg, prefix)
+	if !ok || raw == "" || strings.ContainsFunc(raw, func(r rune) bool { return r < '0' || r > '9' }) {
+		return false
+	}
+	n, err := strconv.Atoi(raw)
+	return err == nil && n >= minimum
+}
+
 func readOnlyCommand(command string, args []string) bool {
 	switch command {
 	case "rev-parse":
-		return true
+		if slices.Equal(args, []string{"--is-shallow-repository"}) {
+			return true
+		}
+		if len(args) != 3 || args[0] != "--verify" || args[1] != "--end-of-options" {
+			return false
+		}
+		ref, ok := strings.CutSuffix(args[2], "^{commit}")
+		normalized, err := NormalizeRef(ref)
+		return ok && err == nil && ref == normalized
 	case "cat-file":
 		return slices.Equal(args, []string{"--batch"}) ||
 			len(args) == 2 && args[0] == "commit" && validOID(args[1])
@@ -182,9 +226,40 @@ func readOnlyCommand(command string, args []string) bool {
 		}
 		return slices.Equal(args[:len(args)-1], []string{"--no-patch", "--no-notes", "--no-show-signature", "--format=%B"}) ||
 			len(args) == 6 && slices.Equal(args[:4], []string{"-s", "--no-show-signature", "--no-notes", "--encoding=UTF-8"}) &&
-				args[4] == "--format=%H%x00%T%x00%P%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%s"
+				args[4] == commitFormat
 	case "ls-tree":
-		return len(args) == 4 && slices.Equal(args[:3], []string{"-r", "-l", "-z"}) && validOID(args[3])
+		return len(args) == 4 && slices.Equal(args[:3], []string{"-r", "-l", "-z"}) && validOID(args[3]) ||
+			len(args) == 5 && slices.Equal(args[:2], []string{"-l", "-z"}) && fileRevision(args[2:])
+	case "for-each-ref":
+		return slices.Equal(args, []string{refFormat, "refs/heads", "refs/tags"})
+	case "symbolic-ref":
+		return slices.Equal(args, []string{"--quiet", "HEAD"})
+	case "log":
+		if len(args) < 13 || !slices.Equal(args[:3], []string{"--no-notes", "--no-show-signature", "--encoding=UTF-8"}) {
+			return false
+		}
+		args = args[3:]
+		if args[0] == "--follow" {
+			args = args[1:]
+		}
+		return len(args) == 10 && slices.Equal(args[:4], []string{"-M", "-l256", "--name-status", "-z"}) &&
+			validGitNumber(args[4], "--skip=", 0) && validGitNumber(args[5], "--max-count=", 1) &&
+			args[6] == commitFormat && fileRevision(args[7:])
+	case "blame":
+		if len(args) < 5 || !slices.Equal(args[:2], []string{"--no-textconv", "--porcelain"}) {
+			return false
+		}
+		args = args[2:]
+		if len(args) == 5 && args[0] == "-L" {
+			start, end, ok := strings.Cut(args[1], ",")
+			if !ok || !validGitNumber(start, "", 1) || !validGitNumber(end, "", 1) {
+				return false
+			}
+			first, _ := strconv.Atoi(start)
+			last, _ := strconv.Atoi(end)
+			return first <= last && fileRevision(args[2:])
+		}
+		return fileRevision(args)
 	case "rev-list":
 		if len(args) != 4 || args[0] != "--topo-order" || !validOID(args[2]) || args[3] != "--" {
 			return false
@@ -206,6 +281,10 @@ func readOnlyCommand(command string, args []string) bool {
 			validOID(args[len(flags)]) && validOID(args[len(flags)+1]) && args[len(flags)+2] == "--"
 	}
 	return false
+}
+
+func fileRevision(args []string) bool {
+	return len(args) == 3 && validOID(args[0]) && args[1] == "--" && validRepoPath(args[2])
 }
 
 type boundedOutput struct {
@@ -273,4 +352,19 @@ func (g gitRunner) resolve(ctx context.Context, dir, ref string) (string, error)
 		return "", errors.New("Git returned an invalid commit ID")
 	}
 	return oid, nil
+}
+
+func (g gitRunner) isShallow(ctx context.Context, dir string) (bool, error) {
+	out, err := g.run(ctx, 64, false, "--git-dir="+dir, "rev-parse", "--is-shallow-repository")
+	if err != nil {
+		return false, err
+	}
+	switch strings.TrimSpace(string(out)) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, errors.New("Git returned an invalid shallow repository status")
+	}
 }

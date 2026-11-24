@@ -310,6 +310,11 @@ Set `R=/api/v1/projects/$PROJECT_ID/repositories/$REPO_ID` for an associated rep
 | GET | `$R/commits?ref=main` | Published tip, import window and topologically ordered commits. |
 | GET | `$R/commits/:sha`, `$R/commits/:sha/files` | Imported metadata or first-parent changes. A root commit is compared with an empty tree. |
 | GET | `$R/compare?base=<sha>&head=<sha>` | File changes, binary flags, rename paths, line counts and a bounded unified patch. Both full SHAs must already belong to this repository's imported history. |
+| GET | `$R/commits/:sha/tree?path_prefix=src/` | Regular files at a full commit SHA. Filter by an exact path or directory prefix. |
+| GET | `$R/commits/:sha/file?path=src/main.go` | File metadata, SHA-256 checksum and UTF-8 text at a full commit SHA. Binary files return metadata with `binary: true`. |
+| GET | `$R/files/history?path=src/main.go&ref=main&follow=true` | Commits that changed a file. Set `follow=true` to track renames. |
+| GET | `$R/files/blame?path=src/main.go&ref=main&start_line=1&end_line=20` | Line attribution, including original filename, line number and Git boundary flags. |
+| GET | `$R/refs?type=tag` | Branches, tags, the default branch and peeled annotated tag hashes. Omit `type` to list both branches and tags. |
 | POST | `$R/github-activity/sync` | Synchronize public GitHub issues, PRs, comments, review comments and associated commits. |
 | GET | `$R/issues`, `$R/pulls` | Repository activity lists. Project-wide lists are available at `/api/v1/projects/:id/issues` and `/api/v1/projects/:id/pulls`. |
 | GET | `$R/issues/:number`, `$R/pulls/:number` | Issue or PR details. Append `/comments` for discussion and review comments, or `/commits` for a PR's commit links. |
@@ -317,3 +322,9 @@ Set `R=/api/v1/projects/$PROJECT_ID/repositories/$REPO_ID` for an associated rep
 | PUT | `$R/sync-policy/:kind` | Set a policy, e.g. `{"enabled":true,"interval_seconds":3600}`. Kinds are `files`, `commits` and `github_activity`. |
 
 Lists accept `limit` (default 20, maximum 100) and nonnegative `offset`. File pagination in Compare applies to `items`. The patch describes the full comparison. Job results and stored data survive API and worker restarts. Commit history and activity use the scoped sync endpoints. See the [operations guide](docs/OPERATIONS.md) and [measured performance report](docs/PERFORMANCE.md).
+
+Commit history sync expands the imported ref window in steps of 100 up to 2,000 commits. The job result and `GET $R/commits` include `window_limit`, `page_size`, `complete`, `truncated`, `window_limit_reached` and `window_status`. A `partial` window can expand on the next sync. `window_limit_reached` means older commits exist past the cap. `complete` means the window contains all reachable commits.
+
+Historical tree, file, history, blame and ref queries read directly from Git. They can use commits outside the import window without changing the active snapshot. File history and blame default to `HEAD`. Blame accepts an inclusive pair of 1-based line numbers spanning at most 2,000 lines. With no range, it returns up to the first 2,000 lines and indicates whether it capped the output. File content and blame enforce the configured maximum file size.
+
+For GitHub repositories, pinned tree and file reads can use a cached commit while the remote is offline. Git fetches missing commits as needed. File history and blame may deepen a shallow cache and report remaining shallow boundaries. A missing commit or path returns `404`, an upstream rate limit returns `429`, and a transport failure when Git needs the remote returns `502`.

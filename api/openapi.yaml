@@ -1176,6 +1176,136 @@ paths:
         "404": {"description": "Repository or history not found"}
         "401": {"$ref": "#/components/responses/Unauthorized"}
         "500": {"$ref": "#/components/responses/InternalError"}
+  "/api/v1/projects/{id}/repositories/{repoId}/commits/{sha}/tree":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+      - {"$ref": "#/components/parameters/HistorySHA"}
+      - {"$ref": "#/components/parameters/HistoryLimit"}
+      - {"$ref": "#/components/parameters/HistoryOffset"}
+      - {"in": "query", "name": "path_prefix", "schema": {"type": "string"}, "description": "Match this relative path or files inside this directory."}
+    get:
+      operationId: listHistoricalTree
+      summary: "List regular files at a Git commit"
+      security: [{BearerAuth: []}]
+      responses:
+        "200":
+          description: "Git query result"
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/CommitTreeResult"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "403": {"$ref": "#/components/responses/Forbidden"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "429": {"$ref": "#/components/responses/RateLimited"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "502": {"$ref": "#/components/responses/BadGateway"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+  "/api/v1/projects/{id}/repositories/{repoId}/commits/{sha}/file":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+      - {"$ref": "#/components/parameters/HistorySHA"}
+      - {"$ref": "#/components/parameters/HistoryPath"}
+    get:
+      operationId: getHistoricalFile
+      summary: "Read a regular file at a Git commit"
+      security: [{BearerAuth: []}]
+      responses:
+        "200":
+          description: "Git query result"
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/CommitFileResult"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "403": {"$ref": "#/components/responses/Forbidden"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "429": {"$ref": "#/components/responses/RateLimited"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "502": {"$ref": "#/components/responses/BadGateway"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+  "/api/v1/projects/{id}/repositories/{repoId}/files/history":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+      - {"$ref": "#/components/parameters/HistoryPath"}
+      - {"$ref": "#/components/parameters/HistoryRef"}
+      - {"$ref": "#/components/parameters/HistoryLimit"}
+      - {"$ref": "#/components/parameters/HistoryOffset"}
+      - {"in": "query", "name": "follow", "schema": {"type": "boolean", "default": false}, "description": "Follow the file across renames."}
+    get:
+      operationId: listFileHistory
+      summary: "List commits that changed a repository file"
+      security: [{BearerAuth: []}]
+      responses:
+        "200":
+          description: "Git query result"
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/FileHistoryResult"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "403": {"$ref": "#/components/responses/Forbidden"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "429": {"$ref": "#/components/responses/RateLimited"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "502": {"$ref": "#/components/responses/BadGateway"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+  "/api/v1/projects/{id}/repositories/{repoId}/files/blame":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+      - {"$ref": "#/components/parameters/HistoryPath"}
+      - {"$ref": "#/components/parameters/HistoryRef"}
+      - {"in": "query", "name": "start_line", "schema": {"type": "integer", "minimum": 1, "maximum": 2147483647}, "description": "Inclusive 1-based range. Supply both bounds for a range of at most 2000 lines."}
+      - {"in": "query", "name": "end_line", "schema": {"type": "integer", "minimum": 1, "maximum": 2147483647}, "description": "Inclusive 1-based range. Supply both bounds for a range of at most 2000 lines."}
+    get:
+      operationId: getFileBlame
+      summary: "Attribute lines of a text file to their original commits"
+      security: [{BearerAuth: []}]
+      responses:
+        "200":
+          description: "Git query result"
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/FileBlameResult"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "403": {"$ref": "#/components/responses/Forbidden"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "429": {"$ref": "#/components/responses/RateLimited"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "502": {"$ref": "#/components/responses/BadGateway"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+  "/api/v1/projects/{id}/repositories/{repoId}/refs":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+      - {"$ref": "#/components/parameters/HistoryLimit"}
+      - {"$ref": "#/components/parameters/HistoryOffset"}
+      - {"in": "query", "name": "type", "schema": {"type": "string", "enum": ["branch", "tag"]}}
+    get:
+      operationId: listRepositoryRefs
+      summary: "List Git branches and tags"
+      security: [{BearerAuth: []}]
+      responses:
+        "200":
+          description: "Git query result"
+          content:
+            application/json:
+              schema: {"$ref": "#/components/schemas/RefListResult"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "403": {"$ref": "#/components/responses/Forbidden"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "429": {"$ref": "#/components/responses/RateLimited"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "502": {"$ref": "#/components/responses/BadGateway"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
   "/api/v1/projects/{id}/repositories/{repoId}/compare":
     parameters:
       - {"$ref": "#/components/parameters/id"}
@@ -1205,6 +1335,7 @@ paths:
     post:
       operationId: syncCommits
       summary: "Import reachable history for the optional JSON ref"
+      description: "Adds up to 100 commits to the import window per call, up to 2000 per ref. Successful jobs return a CommitHistorySyncResult."
       security: [{BearerAuth: []}]
       requestBody:
         content:
@@ -1505,6 +1636,30 @@ components:
       name: "offset"
       in: "query"
       schema: {"type": "integer", "minimum": 0}
+    HistorySHA:
+      name: sha
+      in: path
+      required: true
+      schema: {type: string, pattern: '^[0-9a-f]{40}([0-9a-f]{24})?$'}
+    HistoryPath:
+      name: path
+      in: query
+      required: true
+      description: "Literal repository-relative file path. URL-encode reserved characters."
+      schema: {type: string, minLength: 1}
+    HistoryRef:
+      name: ref
+      in: query
+      description: "Branch, tag, or full commit SHA."
+      schema: {type: string, default: HEAD}
+    HistoryLimit:
+      name: limit
+      in: query
+      schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+    HistoryOffset:
+      name: offset
+      in: query
+      schema: {type: integer, minimum: 0, maximum: 2147483647, default: 0}
     DocumentScope:
       name: "scope"
       in: "query"
@@ -1722,15 +1877,35 @@ components:
         binary: {"type": "boolean"}
         insertions: {"type": "integer"}
         deletions: {"type": "integer"}
-    CommitHistoryPage:
+    HistoryWindow:
       type: object
       properties:
-        ref: {"type": "string"}
-        tip: {"type": "string"}
-        synced_at: {"type": "string", "format": "date-time"}
-        total: {"type": "integer"}
-        has_more: {"type": "boolean"}
-        items: {"type": "array", "items": {"$ref": "#/components/schemas/CommitHistoryEntry"}}
+        window_limit: {type: integer, example: 2000}
+        page_size: {type: integer, example: 100}
+        complete: {type: boolean, description: "All reachable commits are imported."}
+        truncated: {type: boolean, description: "Older commits exist beyond the imported window."}
+        window_limit_reached: {type: boolean, description: "The import reached its cap and older commits exist."}
+        window_status: {type: string, enum: [complete, partial, window_limit_reached]}
+    CommitHistoryPage:
+      allOf:
+        - {$ref: "#/components/schemas/HistoryWindow"}
+        - type: object
+          properties:
+            ref: {type: string}
+            tip: {type: string}
+            synced_at: {type: string, format: date-time}
+            total: {type: integer}
+            has_more: {type: boolean}
+            items: {type: array, items: {$ref: "#/components/schemas/CommitHistoryEntry"}}
+    CommitHistorySyncResult:
+      allOf:
+        - {$ref: "#/components/schemas/HistoryWindow"}
+        - type: object
+          properties:
+            tip: {type: string}
+            reachable_count: {type: integer, description: "Number of commits in the published ref window."}
+            imported: {type: integer, description: "Number of new commit records imported by this job."}
+            has_more: {type: boolean}
     CommitHistoryEntry:
       type: object
       properties:
@@ -1747,6 +1922,111 @@ components:
         authored_at: {"type": "string", "format": "date-time"}
         committed_at: {"type": "string", "format": "date-time"}
         truncated: {"type": "boolean"}
+    CommitTreeEntry:
+      type: object
+      properties:
+        path: {type: string}
+        blob_oid: {type: string}
+        mode: {type: string, enum: ["100644", "100755"]}
+        size: {type: integer, format: int64}
+        is_executable: {type: boolean}
+    CommitTreeResult:
+      type: object
+      properties:
+        commit_hash: {type: string}
+        tree_hash: {type: string}
+        path_prefix: {type: string}
+        total: {type: integer}
+        limit: {type: integer}
+        offset: {type: integer}
+        items: {type: array, items: {$ref: "#/components/schemas/CommitTreeEntry"}}
+    CommitFileResult:
+      allOf:
+        - {$ref: "#/components/schemas/CommitTreeEntry"}
+        - type: object
+          properties:
+            commit_hash: {type: string}
+            sha256: {type: string}
+            binary: {type: boolean}
+            line_count: {type: integer, description: "Zero for binary files."}
+            content: {type: string, description: "UTF-8 text. Omitted for binary or empty files."}
+    FileHistoryEntry:
+      type: object
+      properties:
+        hash: {type: string}
+        tree_hash: {type: string}
+        parents: {type: array, items: {type: string}}
+        author_name: {type: string}
+        author_email: {type: string}
+        authored_at: {type: string, format: date-time}
+        committer_name: {type: string}
+        committer_email: {type: string}
+        committed_at: {type: string, format: date-time}
+        subject: {type: string}
+        html_url: {type: string}
+        change_type: {type: string, description: "Git name-status change code."}
+        path: {type: string}
+        old_path: {type: string}
+    FileHistoryResult:
+      type: object
+      properties:
+        ref: {type: string}
+        commit_hash: {type: string}
+        path: {type: string}
+        follow: {type: boolean}
+        has_more: {type: boolean}
+        limit: {type: integer}
+        offset: {type: integer}
+        shallow: {type: boolean}
+        history_complete: {type: boolean, description: "The page has no successor and the repository is not shallow."}
+        truncated: {type: boolean}
+        items: {type: array, items: {$ref: "#/components/schemas/FileHistoryEntry"}}
+    BlameLine:
+      type: object
+      properties:
+        line: {type: integer}
+        original_line: {type: integer}
+        commit_hash: {type: string}
+        author_name: {type: string}
+        author_email: {type: string}
+        authored_at: {type: string, format: date-time}
+        committer_name: {type: string}
+        committer_email: {type: string}
+        committed_at: {type: string, format: date-time}
+        summary: {type: string}
+        filename: {type: string}
+        boundary: {type: boolean}
+        content: {type: string}
+    FileBlameResult:
+      type: object
+      properties:
+        ref: {type: string}
+        commit_hash: {type: string}
+        path: {type: string}
+        start_line: {type: integer}
+        end_line: {type: integer}
+        total_lines: {type: integer}
+        shallow: {type: boolean}
+        boundary_reached: {type: boolean}
+        history_complete: {type: boolean}
+        truncated: {type: boolean, description: "The default range was capped at 2000 lines."}
+        lines: {type: array, items: {$ref: "#/components/schemas/BlameLine"}}
+    GitRef:
+      type: object
+      properties:
+        type: {type: string, enum: [branch, tag]}
+        name: {type: string}
+        ref: {type: string}
+        object_hash: {type: string}
+        commit_hash: {type: string, description: "Peeled commit SHA for an annotated tag pointing to a commit."}
+    RefListResult:
+      type: object
+      properties:
+        default_branch: {type: string, description: "Branch targeted by HEAD when available."}
+        total: {type: integer}
+        limit: {type: integer}
+        offset: {type: integer}
+        items: {type: array, items: {$ref: "#/components/schemas/GitRef"}}
     SyncReceipt:
       type: object
       properties:
@@ -1806,7 +2086,8 @@ components:
         type: {"type": "string"}
         status: {"$ref": "#/components/schemas/JobStatus"}
         payload: {"type": "object", "additionalProperties": true}
-        result: {}
+        result:
+          description: "The job-specific payload. Commit history sync jobs return CommitHistorySyncResult."
         idempotency_key: {"type": "string"}
         attempt: {"type": "integer"}
         max_attempts: {"type": "integer"}

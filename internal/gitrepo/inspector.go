@@ -205,7 +205,7 @@ func validateGitMetadata(gitDir string, roots []localRoot) (string, error) {
 
 	seenObjects := make(map[string]bool)
 	for _, dir := range []string{gitDir, commonDir} {
-		for _, name := range []string{"HEAD", "config", "commondir"} {
+		for _, name := range []string{"HEAD", "config", "commondir", "shallow"} {
 			path, err := resolveWithin(filepath.Join(dir, name), roots)
 			if errors.Is(err, os.ErrNotExist) {
 				continue
@@ -466,6 +466,12 @@ func GitCommand(ctx context.Context, protocol string, args ...string) *exec.Cmd 
 		"-c", "diff.external=",
 		"-c", "diff.orderFile=/dev/null",
 		"-c", "diff.textconv=",
+		"-c", "blame.ignoreRevsFile=",
+		"-c", "log.mailmap=false",
+		"-c", "log.follow=false",
+		"-c", "log.showRoot=true",
+		"-c", "mailmap.file=/dev/null",
+		"-c", "mailmap.blob=",
 		"-c", "push.default=nothing",
 	}
 	cmd := exec.CommandContext(ctx, "git", append(flags, args...)...)

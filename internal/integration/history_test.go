@@ -5,15 +5,25 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/cgi"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"projectlens/internal/domain"
+	"projectlens/internal/gitscan"
+	"projectlens/internal/handler"
+	"projectlens/internal/repository"
+	"projectlens/internal/router"
 	"projectlens/internal/service"
 )
 
@@ -161,8 +171,16 @@ func TestHistoryPages(t *testing.T) {
 	target := domain.SyncTarget{RepositoryID: f.repoID, ProjectID: f.projectID, Ref: "main"}
 	for i, n := range []int{100, 2, 0} {
 		page, err := svc.Sync(t.Context(), target)
-		if err != nil || page.Imported != n || page.HasMore != (i == 0) {
+		more := i == 0
+		if err != nil || page.Imported != n || page.HasMore != more ||
+			page.HistoryWindow != gitscan.DescribeHistoryWindow(page.ReachableCount, more) ||
+			page.ReachableCount != min((i+1)*gitscan.HistoryPage, 102) {
 			t.Fatal(page, err)
+		}
+		raw, err := f.repos.HistoryList(t.Context(), f.repoID, "main", 1, 0)
+		var stored gitscan.HistoryWindow
+		if err != nil || json.Unmarshal(raw, &stored) != nil || stored != page.HistoryWindow {
+			t.Fatalf("stored window = %s, %v, want %+v", raw, err, page.HistoryWindow)
 		}
 	}
 	result, err := f.repos.HistoryList(t.Context(), f.repoID, "main", 10, 100)
@@ -175,5 +193,206 @@ func TestHistoryPages(t *testing.T) {
 	}
 	if err := json.Unmarshal(result, &page); err != nil || page.Total != 102 || len(page.Items) != 2 {
 		t.Fatal(page, err)
+	}
+}
+
+func TestHistoryImportRepairsShallowBoundary(t *testing.T) {
+	f := localSyncFixture(t)
+	f.write(t, "file.txt", "first\n")
+	f.commit(t, "first")
+	f.write(t, "file.txt", "first\nsecond\n")
+	tip := f.commit(t, "second")
+	shallow := filepath.Join(t.TempDir(), "shallow")
+	syncGit(t, f.dir, "clone", "--depth=1", "--", "file://"+f.dir, shallow)
+	f.attach(t, domain.Repository{SourceType: domain.RepositorySourceLocalGit, Source: shallow, LocalPath: &shallow})
+	svc := service.HistoryService{Repositories: f.repos, Locks: f.store, Scanner: f.scanner, Tx: f.tx}
+	target := domain.SyncTarget{RepositoryID: f.repoID, ProjectID: f.projectID, Ref: "main"}
+	ctx := t.Context()
+
+	check := func(status string, truncated bool, total int) {
+		t.Helper()
+		page, err := svc.Sync(ctx, target)
+		if err != nil || page.WindowStatus != status || page.Imported != 1 {
+			t.Fatalf("sync result = %+v, %v", page, err)
+		}
+		raw, err := f.repos.Commit(ctx, f.repoID, tip, true, 20, 0)
+		var files struct {
+			Truncated bool
+			Total     int
+		}
+		if err != nil || json.Unmarshal(raw, &files) != nil || files.Truncated != truncated || files.Total != total {
+			t.Fatalf("commit files = %s, %v", raw, err)
+		}
+	}
+	check("partial", true, 0)
+	syncGit(t, shallow, "fetch", "--unshallow")
+	check("complete", false, 1)
+}
+
+func TestHistoricalQueryEndpointsPreserveSnapshots(t *testing.T) {
+	f := localSyncFixture(t)
+	ctx := t.Context()
+	f.write(t, "src/before.txt", "first\nsecond\n")
+	f.write(t, "binary", "a\x00b")
+	f.write(t, "large", strings.Repeat("a", int(f.cfg.Scanner.MaxFileSize)+1))
+	first := f.commit(t, "original")
+	syncGit(t, f.dir, "mv", "src/before.txt", "src/after.txt")
+	renamed := f.commit(t, "rename")
+	f.write(t, "src/after.txt", "first\nchanged\n")
+	tip := f.commit(t, "update")
+	syncGit(t, f.dir, "tag", "-a", "v1", "-m", "release", first)
+	tag := syncGit(t, f.dir, "rev-parse", "refs/tags/v1")
+
+	localID := f.repoID
+	localHead := syncGit(t, f.dir, "rev-parse", "HEAD")
+	f.write(t, "src/after.txt", "dirty worktree\n")
+	localStatus := syncGit(t, f.dir, "status", "--porcelain")
+
+	web := t.TempDir()
+	bare := filepath.Join(web, "owner", "project.git")
+	if err := os.MkdirAll(filepath.Dir(bare), 0700); err != nil {
+		t.Fatal(err)
+	}
+	syncGit(t, f.dir, "clone", "--bare", "--", f.dir, bare)
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unavailable atomic.Int32
+	backend := &cgi.Handler{Path: git, Dir: web, Args: []string{"http-backend"},
+		Env: []string{"GIT_PROJECT_ROOT=" + web, "GIT_HTTP_EXPORT_ALL=1", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null"}}
+	mirror := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if code := unavailable.Load(); code != 0 {
+			w.WriteHeader(int(code))
+			return
+		}
+		backend.ServeHTTP(w, r)
+	}))
+	t.Cleanup(mirror.Close)
+	f.cfg.GitHub.GitBaseURL = mirror.URL
+	f.cfg.GitHub.Token = ""
+	const remote = "https://github.com/owner/project"
+	owner, name := "owner", "project"
+	githubRepoID := int64(42)
+	f.attach(t, domain.Repository{SourceType: domain.RepositorySourceGitHub, Source: remote, RemoteURL: remote,
+		GitHubOwner: &owner, GitHubRepo: &name, GitHubRepoID: &githubRepoID})
+
+	history := &service.HistoryService{Repositories: f.repos, Locks: f.store, Scanner: f.scanner, Tx: f.tx}
+	api := router.New(f.cfg, f.log, router.Dependencies{
+		History: &handler.HistoryHandler{Service: history, Log: f.log},
+	})
+	foreign, err := service.NewProjectService(repository.NewPostgresProjectRepository(f.pool), f.tx).
+		Create(ctx, domain.CreateProjectInput{Slug: "foreign-history", Name: "Foreign History"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	get := func(path string, code int, data any) {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		api.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if recorder.Code != code {
+			t.Fatalf("GET %s = %d %s, want %d", path, recorder.Code, recorder.Body, code)
+		}
+		if data != nil {
+			if err := json.Unmarshal(recorder.Body.Bytes(), data); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	snapshotState := func(repoID uuid.UUID) string {
+		t.Helper()
+		var state string
+		err := f.pool.QueryRow(ctx, `
+			SELECT jsonb_build_object(
+				'snapshots', (SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM snapshots s WHERE repository_id=$1),
+				'files', (SELECT jsonb_agg(to_jsonb(f) ORDER BY f.id) FROM source_files f WHERE repository_id=$1)
+			)::text`, repoID).Scan(&state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return state
+	}
+	for _, id := range []uuid.UUID{localID, f.repoID} {
+		snapshot, err := f.svc.SyncRepository(ctx, f.projectID, id, "main", nil)
+		if err != nil || snapshot.CommitHash != tip {
+			t.Fatalf("active snapshot = %+v, %v", snapshot, err)
+		}
+		before := snapshotState(id)
+		base := projects + "/" + f.projectID.String() + "/repositories/" + id.String()
+		forbidden := projects + "/" + foreign.ID.String() + "/repositories/" + id.String()
+		treePath := "/commits/" + first + "/tree?path_prefix=src%2F&limit=1"
+		filePath := "/commits/" + first + "/file?path=" + url.QueryEscape("src/before.txt")
+		historyPath := "/files/history?path=src%2Fafter.txt&ref=main&follow=true&limit=2"
+		blamePath := "/files/blame?path=src%2Fafter.txt&ref=" + tip + "&start_line=1&end_line=2"
+		refsPath := "/refs?type=tag"
+		for _, path := range []string{treePath, filePath, historyPath, blamePath, refsPath} {
+			get(forbidden+path, http.StatusNotFound, nil)
+		}
+
+		// Query historical objects before importing commit history into Postgres.
+		var tree gitscan.CommitTreeResult
+		get(base+treePath, http.StatusOK, &tree)
+		if tree.CommitHash != first || tree.Total != 1 || len(tree.Items) != 1 || tree.Items[0].Path != "src/before.txt" {
+			t.Fatalf("tree = %+v", tree)
+		}
+		var file gitscan.CommitFileResult
+		get(base+filePath, http.StatusOK, &file)
+		if file.Content != "first\nsecond\n" || file.CommitHash != first || file.LineCount != 2 {
+			t.Fatalf("file = %+v", file)
+		}
+		var changes gitscan.FileHistoryResult
+		get(base+historyPath, http.StatusOK, &changes)
+		if !changes.HasMore || !changes.Truncated || changes.Shallow || len(changes.Items) != 2 ||
+			changes.Items[0].Hash != tip || changes.Items[1].Hash != renamed || changes.Items[1].OldPath != "src/before.txt" {
+			t.Fatalf("history = %+v", changes)
+		}
+		get(base+historyPath+"&offset=2", http.StatusOK, &changes)
+		if changes.HasMore || !changes.HistoryComplete || len(changes.Items) != 1 || changes.Items[0].Hash != first {
+			t.Fatalf("second history page = %+v", changes)
+		}
+		var blame gitscan.FileBlameResult
+		get(base+blamePath, http.StatusOK, &blame)
+		if len(blame.Lines) != 2 || blame.Lines[0].CommitHash != first || blame.Lines[0].Filename != "src/before.txt" ||
+			blame.Lines[1].CommitHash != tip || blame.Lines[1].Content != "changed" {
+			t.Fatalf("blame = %+v", blame)
+		}
+		var refs gitscan.RefListResult
+		get(base+refsPath, http.StatusOK, &refs)
+		if refs.DefaultBranch != "main" || refs.Total != 1 || len(refs.Items) != 1 ||
+			refs.Items[0].ObjectHash != tag || refs.Items[0].CommitHash != first {
+			t.Fatalf("refs = %+v", refs)
+		}
+
+		get(base+"/commits/"+first+"/file?path=missing", http.StatusNotFound, nil)
+		get(base+"/commits/"+strings.Repeat("0", 40)+"/tree", http.StatusNotFound, nil)
+		get(base+"/commits/"+first+"/file?path=large", http.StatusRequestEntityTooLarge, nil)
+		get(base+"/commits/"+first+"/file?path=%2E%2E%2Fsecret", http.StatusBadRequest, nil)
+		get(base+"/files/blame?path=binary", http.StatusBadRequest, nil)
+		if id == f.repoID {
+			unavailable.Store(http.StatusServiceUnavailable)
+			get(base+filePath, http.StatusOK, nil)
+			get(base+refsPath, http.StatusBadGateway, nil)
+			unavailable.Store(http.StatusTooManyRequests)
+			get(base+refsPath, http.StatusTooManyRequests, nil)
+			unavailable.Store(0)
+		}
+
+		page, err := history.Sync(ctx, domain.SyncTarget{ProjectID: f.projectID, RepositoryID: id, Ref: "main"})
+		if err != nil || page.Imported != 3 || page.ReachableCount != 3 ||
+			page.WindowStatus != "complete" || !page.Complete || page.Truncated || page.WindowLimitReached {
+			t.Fatalf("published history = %+v, %v", page, err)
+		}
+		var window gitscan.HistoryWindow
+		get(base+"/commits?ref=main", http.StatusOK, &window)
+		if window != page.HistoryWindow || window.WindowLimit != gitscan.HistoryLimit || window.PageSize != gitscan.HistoryPage {
+			t.Fatalf("commit listing window = %+v, want %+v", window, page.HistoryWindow)
+		}
+		if snapshotState(id) != before {
+			t.Fatal("historical queries or commit import changed snapshots or source_files")
+		}
+	}
+	if syncGit(t, f.dir, "rev-parse", "HEAD") != localHead || syncGit(t, f.dir, "status", "--porcelain") != localStatus ||
+		syncGit(t, bare, "rev-parse", "HEAD") != tip {
+		t.Fatal("repository HEAD or local worktree changed")
 	}
 }
