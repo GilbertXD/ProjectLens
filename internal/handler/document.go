@@ -9,11 +9,13 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"projectlens/internal/config"
 	"projectlens/internal/domain"
@@ -21,11 +23,11 @@ import (
 
 type DocumentService interface {
 	Create(context.Context, string, domain.CreateDocumentInput) (domain.Document, error)
-	GetByID(context.Context, string, string) (domain.Document, error)
+	GetByID(context.Context, string, string, *uuid.UUID) (domain.Document, error)
 	ListByProject(context.Context, string, domain.ListDocumentsFilter) (domain.DocumentListResult, error)
-	Update(context.Context, string, string, domain.UpdateDocumentInput) (domain.Document, error)
-	Patch(context.Context, string, string, domain.PatchDocumentInput) (domain.Document, error)
-	Delete(context.Context, string, string, *int64) error
+	Update(context.Context, string, string, *uuid.UUID, domain.UpdateDocumentInput) (domain.Document, error)
+	Patch(context.Context, string, string, *uuid.UUID, domain.PatchDocumentInput) (domain.Document, error)
+	Delete(context.Context, string, string, *uuid.UUID, *int64) error
 }
 
 type DocumentHandler struct {
@@ -42,13 +44,30 @@ func NewDocumentHandler(service DocumentService, log *slog.Logger, maxContentByt
 }
 
 func (h *DocumentHandler) Register(group *gin.RouterGroup) {
-	docs := group.Group("/projects/:id/documents")
-	docs.POST("", h.create)
-	docs.GET("", h.list)
-	docs.GET("/:docId", h.get)
-	docs.PUT("/:docId", h.update)
-	docs.PATCH("/:docId", h.patch)
-	docs.DELETE("/:docId", h.delete)
+	for _, path := range []string{"/projects/:id/documents", "/projects/:id/repositories/:repoId/documents"} {
+		docs := group.Group(path)
+		docs.POST("", h.withDocumentScope(h.create))
+		docs.GET("", h.withDocumentScope(h.list))
+		docs.GET("/:docId", h.withDocumentScope(h.get))
+		docs.PUT("/:docId", h.withDocumentScope(h.update))
+		docs.PATCH("/:docId", h.withDocumentScope(h.patch))
+		docs.DELETE("/:docId", h.withDocumentScope(h.delete))
+	}
+}
+
+func (h *DocumentHandler) withDocumentScope(next func(*gin.Context, *uuid.UUID)) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var repositoryID *uuid.UUID
+		if raw := c.Param("repoId"); raw != "" {
+			id, err := uuid.Parse(raw)
+			if err != nil {
+				h.writeError(c, fmt.Errorf("%w: invalid repository ID", domain.ErrInvalidInput))
+				return
+			}
+			repositoryID = &id
+		}
+		next(c, repositoryID)
+	}
 }
 
 func decodeDocument[T any](c *gin.Context, maxBodyBytes int64) (T, error) {
@@ -120,18 +139,50 @@ func documentWriteVersion(header http.Header, body json.RawMessage) (int64, erro
 	return version, nil
 }
 
-func (h *DocumentHandler) create(c *gin.Context) {
+func (h *DocumentHandler) create(c *gin.Context, repositoryID *uuid.UUID) {
 	input, err := decodeDocument[domain.CreateDocumentInput](c, h.maxBodyBytes)
 	if err != nil {
 		h.writeError(c, err)
 		return
 	}
+	if repositoryID != nil {
+		if input.RepositoryID != nil && *input.RepositoryID != *repositoryID {
+			h.writeError(c, fmt.Errorf("%w: repository_id must match the repository in the path", domain.ErrInvalidInput))
+			return
+		}
+		input.RepositoryID = repositoryID
+	}
 	doc, err := h.service.Create(c.Request.Context(), c.Param("id"), input)
 	h.respond(c, http.StatusCreated, doc, err)
 }
 
-func (h *DocumentHandler) list(c *gin.Context) {
-	var filter domain.ListDocumentsFilter
+func (h *DocumentHandler) list(c *gin.Context, repositoryID *uuid.UUID) {
+	query, err := url.ParseQuery(c.Request.URL.RawQuery)
+	if err != nil {
+		h.writeError(c, fmt.Errorf("%w: malformed query parameters", domain.ErrInvalidInput))
+		return
+	}
+	filter := domain.ListDocumentsFilter{RepositoryID: repositoryID}
+	if values := query["scope"]; len(values) > 0 {
+		scope := domain.KnowledgeScope(values[0])
+		if len(values) != 1 || (scope != domain.KnowledgeScopeProject && scope != domain.KnowledgeScopeRepository) {
+			h.writeError(c, fmt.Errorf("%w: scope must be project or repository", domain.ErrInvalidInput))
+			return
+		}
+		filter.Scope = scope
+	}
+	if values := query["repository_id"]; len(values) > 0 {
+		id, err := uuid.Parse(values[0])
+		if len(values) != 1 || err != nil || (repositoryID != nil && *repositoryID != id) {
+			h.writeError(c, fmt.Errorf("%w: invalid repository_id for this document list", domain.ErrInvalidInput))
+			return
+		}
+		filter.RepositoryID = &id
+	}
+	if filter.Scope == domain.KnowledgeScopeProject && filter.RepositoryID != nil {
+		h.writeError(c, fmt.Errorf("%w: project scope cannot be combined with repository_id", domain.ErrInvalidInput))
+		return
+	}
 	for _, field := range []struct {
 		name   string
 		target *int
@@ -140,7 +191,7 @@ func (h *DocumentHandler) list(c *gin.Context) {
 	}{
 		{"limit", &filter.Limit, 1, 100}, {"offset", &filter.Offset, 0, 0},
 	} {
-		if value, ok := c.GetQueryArray(field.name); ok {
+		if value := query[field.name]; len(value) > 0 {
 			number, err := strconv.Atoi(value[0])
 			if len(value) != 1 || err != nil || number < field.min || (field.max != 0 && number > field.max) {
 				h.writeError(c, fmt.Errorf("%w: invalid %s", domain.ErrInvalidInput, field.name))
@@ -148,6 +199,9 @@ func (h *DocumentHandler) list(c *gin.Context) {
 			}
 			*field.target = number
 		}
+	}
+	if repositoryID != nil {
+		filter.Scope = domain.KnowledgeScopeRepository
 	}
 	result, err := h.service.ListByProject(c.Request.Context(), c.Param("id"), filter)
 	if err != nil {
@@ -157,14 +211,15 @@ func (h *DocumentHandler) list(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
-func (h *DocumentHandler) get(c *gin.Context) {
-	doc, err := h.service.GetByID(c.Request.Context(), c.Param("id"), c.Param("docId"))
+func (h *DocumentHandler) get(c *gin.Context, repositoryID *uuid.UUID) {
+	doc, err := h.service.GetByID(c.Request.Context(), c.Param("id"), c.Param("docId"), repositoryID)
 	h.respond(c, http.StatusOK, doc, err)
 }
 
-func (h *DocumentHandler) update(c *gin.Context) {
+func (h *DocumentHandler) update(c *gin.Context, repositoryID *uuid.UUID) {
 	input, err := decodeDocument[struct {
-		domain.CreateDocumentInput
+		Title   string          `json:"title"`
+		Content string          `json:"content"`
 		Version json.RawMessage `json:"version"`
 	}](c, h.maxBodyBytes)
 	if err != nil {
@@ -176,12 +231,12 @@ func (h *DocumentHandler) update(c *gin.Context) {
 		h.writeError(c, err)
 		return
 	}
-	doc, err := h.service.Update(c.Request.Context(), c.Param("id"), c.Param("docId"),
+	doc, err := h.service.Update(c.Request.Context(), c.Param("id"), c.Param("docId"), repositoryID,
 		domain.UpdateDocumentInput{Title: input.Title, Content: input.Content, Version: version})
 	h.respond(c, http.StatusOK, doc, err)
 }
 
-func (h *DocumentHandler) patch(c *gin.Context) {
+func (h *DocumentHandler) patch(c *gin.Context, repositoryID *uuid.UUID) {
 	input, err := decodeDocument[struct {
 		Title   *string         `json:"title"`
 		Content *string         `json:"content"`
@@ -196,15 +251,15 @@ func (h *DocumentHandler) patch(c *gin.Context) {
 		h.writeError(c, err)
 		return
 	}
-	doc, err := h.service.Patch(c.Request.Context(), c.Param("id"), c.Param("docId"),
+	doc, err := h.service.Patch(c.Request.Context(), c.Param("id"), c.Param("docId"), repositoryID,
 		domain.PatchDocumentInput{Title: input.Title, Content: input.Content, Version: version})
 	h.respond(c, http.StatusOK, doc, err)
 }
 
-func (h *DocumentHandler) delete(c *gin.Context) {
+func (h *DocumentHandler) delete(c *gin.Context, repositoryID *uuid.UUID) {
 	version, err := documentIfMatch(c.Request.Header)
 	if err == nil {
-		err = h.service.Delete(c.Request.Context(), c.Param("id"), c.Param("docId"), version)
+		err = h.service.Delete(c.Request.Context(), c.Param("id"), c.Param("docId"), repositoryID, version)
 	}
 	if err != nil {
 		h.writeError(c, err)

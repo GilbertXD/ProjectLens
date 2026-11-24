@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -75,17 +76,29 @@ func (h *RepositoryHandler) associate(c *gin.Context) {
 }
 
 func (h *RepositoryHandler) list(c *gin.Context) {
-	filter := domain.ListRepositoriesFilter{SourceType: domain.RepositorySourceType(c.Query("source_type"))}
-	if value, ok := c.GetQuery("source_type"); ok && value == "" {
+	query, err := url.ParseQuery(c.Request.URL.RawQuery)
+	if err != nil {
+		h.writeError(c, fmt.Errorf("%w: malformed query parameters", domain.ErrInvalidInput))
+		return
+	}
+	filter := domain.ListRepositoriesFilter{SourceType: domain.RepositorySourceType(query.Get("source_type"))}
+	if query.Has("source_type") && filter.SourceType == "" {
 		h.writeError(c, fmt.Errorf("%w: source_type must be local_git or github", domain.ErrInvalidInput))
 		return
+	}
+	if values := query["role"]; len(values) > 0 {
+		if len(values) != 1 || !domain.RepositoryRole(values[0]).Valid() {
+			h.writeError(c, fmt.Errorf("%w: role must be primary or reference", domain.ErrInvalidInput))
+			return
+		}
+		filter.Role = domain.RepositoryRole(values[0])
 	}
 	for _, field := range []struct {
 		name   string
 		target *int
 	}{{"limit", &filter.Limit}, {"offset", &filter.Offset}} {
-		if raw, ok := c.GetQuery(field.name); ok {
-			value, err := strconv.Atoi(raw)
+		if query.Has(field.name) {
+			value, err := strconv.Atoi(query.Get(field.name))
 			if err != nil || (field.name == "limit" && value == 0) {
 				h.writeError(c, fmt.Errorf("%w: invalid %s", domain.ErrInvalidInput, field.name))
 				return

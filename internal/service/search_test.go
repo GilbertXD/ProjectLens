@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"regexp"
+	"slices"
 	"testing"
 	"time"
 
@@ -66,6 +67,7 @@ func TestSearchFilterValidation(t *testing.T) {
 	cfg := config.SearchConfig{DefaultLimit: 3, MaxLimit: 5, MaxQueryLength: 2, CacheTTL: time.Minute}
 	svc := NewSearchService(store, nil, cfg, "test", nil)
 	id := uuid.NewString()
+	repoID := uuid.New()
 	if _, err := svc.Search(t.Context(), "invalid", domain.SearchFilter{Query: "ok"}); !errors.Is(err, domain.ErrInvalidInput) {
 		t.Fatalf("invalid project ID: %v", err)
 	}
@@ -73,6 +75,14 @@ func TestSearchFilterValidation(t *testing.T) {
 		{Query: " "}, {Query: "a\x00"}, {Query: "\xff"}, {Query: "搜索词"},
 		{Query: "ok", SourceTypes: []domain.SearchSourceType{"unknown"}},
 		{Query: "ok", PathPrefix: "\xff"}, {Query: "ok", PathPrefix: "\x00"},
+		{Query: "ok", Scope: "invalid"},
+		{Query: "ok", Scope: domain.SearchScopeRepository},
+		{Query: "ok", Scope: domain.SearchScopeProject, RepositoryID: &repoID},
+		{Query: "ok", Scope: domain.SearchScopeProject, RepositoryIDs: []uuid.UUID{repoID}},
+		{Query: "ok", Scope: domain.SearchScopeProject, RepositoryRole: domain.RepositoryRolePrimary},
+		{Query: "ok", Scope: domain.SearchScopeCrossRepository, RepositoryID: &repoID},
+		{Query: "ok", RepositoryID: &repoID, RepositoryRole: domain.RepositoryRolePrimary},
+		{Query: "ok", RepositoryRole: "invalid"},
 		{Query: "ok", Limit: -1}, {Query: "ok", Limit: 6}, {Query: "ok", Offset: -1},
 	} {
 		if _, err := svc.Search(t.Context(), id, f); !errors.Is(err, domain.ErrInvalidInput) {
@@ -102,7 +112,7 @@ func TestSearchCacheKeysAndInvalidation(t *testing.T) {
 		t.Fatalf("first search = %+v, %v, TTL = %s", result, err, cache.ttl)
 	}
 	key := cache.key
-	if !regexp.MustCompile("^test:search:v1:p:" + project + ":ver:17:q:[a-f0-9]{64}$").MatchString(key) {
+	if !regexp.MustCompile("^test:search:v2:p:" + project + ":ver:17:q:[a-f0-9]{64}$").MatchString(key) {
 		t.Fatalf("unexpected key %q", key)
 	}
 	f = domain.SearchFilter{Query: "café", Limit: cfg.DefaultLimit, SourceTypes: []domain.SearchSourceType{
@@ -163,7 +173,7 @@ func TestSearchCacheDegradationAndVersionRace(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			id := uuid.New()
 			cfg := config.DefaultSearchConfig()
-			f := domain.SearchFilter{Query: "test", Limit: cfg.DefaultLimit}
+			f := domain.SearchFilter{Query: "test", Limit: cfg.DefaultLimit, Scope: domain.SearchScopeAll}
 			store := &searchTestStore{version: 2, queryVersion: tc.queryVersion}
 			cache := &searchTestCache{data: make(map[string][]byte), getErr: tc.getErr, setErr: tc.setErr}
 			if tc.payload != nil {
@@ -180,5 +190,48 @@ func TestSearchCacheDegradationAndVersionRace(t *testing.T) {
 				t.Fatalf("unexpected SQL error: %v", err)
 			}
 		})
+	}
+}
+
+type searchOwnershipStore struct {
+	searchTestStore
+	projectID    uuid.UUID
+	IDs          []uuid.UUID
+	ownershipErr error
+}
+
+func (s *searchOwnershipStore) ValidateRepositoryOwnership(_ context.Context, projectID uuid.UUID, ids []uuid.UUID) error {
+	s.projectID, s.IDs = projectID, ids
+	return s.ownershipErr
+}
+
+func TestSearchValidatesRepositoryOwnershipBeforeCacheRead(t *testing.T) {
+	store := &searchOwnershipStore{searchTestStore: searchTestStore{version: 1}}
+	cache := &searchTestCache{data: make(map[string][]byte)}
+	svc := NewSearchService(store, cache, config.DefaultSearchConfig(), "test", nil)
+	project := uuid.New()
+	first := uuid.MustParse("11000000-0000-0000-0000-000000000000")
+	second := uuid.MustParse("22000000-0000-0000-0000-000000000000")
+	filter := domain.SearchFilter{Query: "notes", RepositoryIDs: []uuid.UUID{second, first, second}}
+	wantIDs := []uuid.UUID{first, second}
+	result, err := svc.Search(t.Context(), project.String(), filter)
+	if err != nil || result.CacheStatus != domain.SearchCacheStatusMiss || store.projectID != project || !slices.Equal(store.IDs, wantIDs) {
+		t.Fatalf("first search = %+v %v, ownership arguments = %s %v", result, err, store.projectID, store.IDs)
+	}
+	if !slices.Equal(filter.RepositoryIDs, []uuid.UUID{second, first, second}) {
+		t.Fatalf("search mutated the caller's repository_ids: %v", filter.RepositoryIDs)
+	}
+	filter.RepositoryIDs = wantIDs
+	filter.Scope = domain.SearchScopeCrossRepository
+	result, err = svc.Search(t.Context(), project.String(), filter)
+	if err != nil || result.CacheStatus != domain.SearchCacheStatusHit {
+		t.Fatalf("reordered search = %+v %v", result, err)
+	}
+	store.ownershipErr = domain.ErrNotFound
+	gets := cache.gets
+	for _, filter := range []domain.SearchFilter{filter, {Query: "notes", RepositoryID: &first}} {
+		if _, err := svc.Search(t.Context(), project.String(), filter); !errors.Is(err, domain.ErrNotFound) || cache.gets != gets {
+			t.Fatalf("repository ownership failure read the cache or returned the wrong error: %v", err)
+		}
 	}
 }

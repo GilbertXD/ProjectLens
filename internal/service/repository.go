@@ -67,7 +67,14 @@ func (s *RepositoryService) Associate(ctx context.Context, rawProjectID string, 
 	if utf8.RuneCountInString(input.Source) > 2048 {
 		return domain.Repository{}, fmt.Errorf("%w: source must contain at most 2048 characters", domain.ErrInvalidInput)
 	}
-	repo := domain.Repository{ID: uuid.New(), ProjectID: projectID, SourceType: input.SourceType, Source: input.Source}
+	role := domain.RepositoryRolePrimary
+	if input.Role != nil {
+		role = *input.Role
+		if !role.Valid() {
+			return domain.Repository{}, invalidRepositoryRole()
+		}
+	}
+	repo := domain.Repository{Role: role, ID: uuid.New(), ProjectID: projectID, SourceType: input.SourceType, Source: input.Source}
 	if err := s.refresh(ctx, &repo); err != nil {
 		return domain.Repository{}, err
 	}
@@ -89,6 +96,10 @@ func (s *RepositoryService) Associate(ctx context.Context, rawProjectID string, 
 		return domain.Repository{}, duplicateRepository()
 	}
 	return created, err
+}
+
+func invalidRepositoryRole() error {
+	return fmt.Errorf("%w: role must be primary or reference", domain.ErrInvalidInput)
 }
 
 func duplicateRepository() error {
@@ -174,6 +185,9 @@ func (s *RepositoryService) ListByProject(ctx context.Context, rawProjectID stri
 	if filter.SourceType != "" && !validSourceType(filter.SourceType) {
 		return domain.RepositoryListResult{}, fmt.Errorf("%w: source_type must be local_git or github", domain.ErrInvalidInput)
 	}
+	if filter.Role != "" && !filter.Role.Valid() {
+		return domain.RepositoryListResult{}, invalidRepositoryRole()
+	}
 	if filter.Limit == 0 {
 		filter.Limit = 20
 	}
@@ -197,14 +211,18 @@ func (s *RepositoryService) Patch(ctx context.Context, rawProjectID, rawRepoID s
 	if err != nil {
 		return domain.Repository{}, err
 	}
-	if input.Name == nil && input.Description == nil {
+	if input.Name == nil && input.Description == nil && input.Role == nil {
 		return domain.Repository{}, fmt.Errorf("%w: patch must contain at least one field", domain.ErrInvalidInput)
 	}
 	fields, err := normalizeFields(domain.PatchProjectInput{Name: input.Name, Description: input.Description})
 	if err != nil {
 		return domain.Repository{}, err
 	}
-	repo, err := s.store.Patch(ctx, projectID, repoID, domain.PatchRepositoryInput{Name: fields.Name, Description: fields.Description})
+	if input.Role != nil && !input.Role.Valid() {
+		return domain.Repository{}, invalidRepositoryRole()
+	}
+	input.Name, input.Description = fields.Name, fields.Description
+	repo, err := s.store.Patch(ctx, projectID, repoID, input)
 	return repo, repositoryLookupError(err)
 }
 

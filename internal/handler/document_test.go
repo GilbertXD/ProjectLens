@@ -10,35 +10,42 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"projectlens/internal/domain"
 )
 
 type documentServiceStub struct {
-	version int64
-	filter  domain.ListDocumentsFilter
-	err     error
+	repositoryID *uuid.UUID
+	version      int64
+	filter       domain.ListDocumentsFilter
+	err          error
 }
 
 func (s *documentServiceStub) Create(_ context.Context, _ string, input domain.CreateDocumentInput) (domain.Document, error) {
+	s.repositoryID = input.RepositoryID
 	return domain.Document{Title: input.Title, Content: input.Content, Version: 1}, s.err
 }
 
-func (s *documentServiceStub) GetByID(context.Context, string, string) (domain.Document, error) {
+func (s *documentServiceStub) GetByID(_ context.Context, _, _ string, repositoryID *uuid.UUID) (domain.Document, error) {
+	s.repositoryID = repositoryID
 	return domain.Document{Version: 1}, s.err
 }
 
 func (s *documentServiceStub) ListByProject(_ context.Context, _ string, filter domain.ListDocumentsFilter) (domain.DocumentListResult, error) {
+	s.repositoryID = filter.RepositoryID
 	s.filter = filter
 	return domain.DocumentListResult{Items: []domain.DocumentSummary{}, Limit: filter.Limit, Offset: filter.Offset}, s.err
 }
 
-func (s *documentServiceStub) Update(_ context.Context, _, _ string, input domain.UpdateDocumentInput) (domain.Document, error) {
+func (s *documentServiceStub) Update(_ context.Context, _, _ string, repositoryID *uuid.UUID, input domain.UpdateDocumentInput) (domain.Document, error) {
+	s.repositoryID = repositoryID
 	s.version = input.Version
 	return domain.Document{Title: input.Title, Content: input.Content, Version: input.Version + 1}, s.err
 }
 
-func (s *documentServiceStub) Patch(_ context.Context, _, _ string, input domain.PatchDocumentInput) (domain.Document, error) {
+func (s *documentServiceStub) Patch(_ context.Context, _, _ string, repositoryID *uuid.UUID, input domain.PatchDocumentInput) (domain.Document, error) {
+	s.repositoryID = repositoryID
 	s.version = input.Version
 	if input.Title == nil && input.Content == nil {
 		return domain.Document{}, domain.ErrInvalidInput
@@ -46,7 +53,8 @@ func (s *documentServiceStub) Patch(_ context.Context, _, _ string, input domain
 	return domain.Document{Version: input.Version + 1}, s.err
 }
 
-func (s *documentServiceStub) Delete(_ context.Context, _, _ string, version *int64) error {
+func (s *documentServiceStub) Delete(_ context.Context, _, _ string, repositoryID *uuid.UUID, version *int64) error {
+	s.repositoryID = repositoryID
 	if version != nil {
 		s.version = *version
 	}
@@ -132,5 +140,41 @@ func TestDocumentHandlerPagination(t *testing.T) {
 	r.ServeHTTP(w, httptest.NewRequest("GET", base+"?limit=5&offset=3", nil))
 	if w.Code != 200 || svc.filter != (domain.ListDocumentsFilter{Limit: 5, Offset: 3}) {
 		t.Fatalf("list = %d, filter = %+v", w.Code, svc.filter)
+	}
+}
+
+func TestDocumentHandlerRepositoryRoutes(t *testing.T) {
+	repo, otherRepo := uuid.New(), uuid.New()
+	project := "/api/v1/projects/project"
+	base := project + "/repositories/" + repo.String() + "/documents"
+	for _, tc := range []struct {
+		method, path, body string
+		status             int
+	}{
+		{"POST", base, `{"title":"Note"}`, 201},
+		{"POST", base, `{"title":"Note","repository_id":"` + repo.String() + `"}`, 201},
+		{"POST", base, `{"title":"Note","repository_id":"` + otherRepo.String() + `"}`, 400},
+		{"GET", base, "", 200},
+		{"GET", base + "/doc", "", 200},
+		{"PUT", base + "/doc", `{"title":"Note","version":1}`, 200},
+		{"PATCH", base + "/doc", `{"title":"Note","version":1}`, 200},
+		{"DELETE", base + "/doc", "", 204},
+		{"GET", project + "/documents?scope=repository&repository_id=" + repo.String(), "", 200},
+		{"GET", project + "/documents?scope=project&repository_id=" + repo.String(), "", 400},
+		{"GET", base + "?repository_id=" + otherRepo.String(), "", 400},
+		{"GET", base + "?scope=project", "", 400},
+		{"GET", project + "/documents?scope=", "", 400},
+		{"GET", project + "/documents?repository_id=bad", "", 400},
+		{"GET", project + "/repositories/invalid/documents", "", 400},
+	} {
+		svc := &documentServiceStub{}
+		w := httptest.NewRecorder()
+		documentTestRouter(svc).ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body)))
+		if w.Code != tc.status {
+			t.Errorf("%s %s = %d %s, want %d", tc.method, tc.path, w.Code, w.Body, tc.status)
+		}
+		if tc.status < 400 && (svc.repositoryID == nil || *svc.repositoryID != repo) {
+			t.Errorf("%s %s forwarded repository %v, want %s", tc.method, tc.path, svc.repositoryID, repo)
+		}
 	}
 }

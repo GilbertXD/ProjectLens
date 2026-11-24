@@ -13,9 +13,21 @@ const (
 	RepositorySourceGitHub   RepositorySourceType = "github"
 )
 
+type RepositoryRole string
+
+const (
+	RepositoryRolePrimary   RepositoryRole = "primary"
+	RepositoryRoleReference RepositoryRole = "reference"
+)
+
+func (r RepositoryRole) Valid() bool {
+	return r == RepositoryRolePrimary || r == RepositoryRoleReference
+}
+
 type Repository struct {
 	ID               uuid.UUID            `json:"id"`
 	ProjectID        uuid.UUID            `json:"project_id"`
+	Role             RepositoryRole       `json:"role"`
 	SourceType       RepositorySourceType `json:"source_type"`
 	Name             string               `json:"name"`
 	Source           string               `json:"source"`
@@ -36,6 +48,7 @@ type Repository struct {
 }
 
 type AssociateRepositoryInput struct {
+	Role        *RepositoryRole      `json:"role,omitempty"`
 	SourceType  RepositorySourceType `json:"source_type"`
 	Source      string               `json:"source"`
 	Name        *string              `json:"name"`
@@ -43,11 +56,13 @@ type AssociateRepositoryInput struct {
 }
 
 type PatchRepositoryInput struct {
-	Name        *string `json:"name"`
-	Description *string `json:"description"`
+	Role        *RepositoryRole `json:"role,omitempty"`
+	Name        *string         `json:"name"`
+	Description *string         `json:"description"`
 }
 
 type ListRepositoriesFilter struct {
+	Role       RepositoryRole
 	SourceType RepositorySourceType
 	Limit      int
 	Offset     int

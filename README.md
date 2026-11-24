@@ -69,7 +69,7 @@ Database tests use a dedicated schema per test and need a PostgreSQL account tha
 
 The server requires PostgreSQL. For a Go process on the host, provision a database matching `DATABASE_URL` in `.env.example` or export a DSN for an existing database. Compose starts PostgreSQL and stores application data in the named `postgres_data` volume.
 
-The server applies embedded migrations on startup by default. Set `DB_AUTO_MIGRATE=false` if you apply migrations separately using `make migrate-up`. Use `make migrate-status` to inspect migration state. `make migrate-down` rolls back one migration at a time. From the latest version, rollbacks remove unified search first, then drop documents, source files and snapshots, jobs, repositories, and finally projects and project audit logs.
+The server applies embedded migrations on startup by default. Set `DB_AUTO_MIGRATE=false` if you apply migrations separately using `make migrate-up`. Use `make migrate-status` to inspect migration state. `make migrate-down` rolls back one migration at a time. Migration 12 adds repository roles and document ownership. Rolling it back preserves repository and document rows and removes those two fields.
 
 | Method | Path | Result |
 | --- | --- | --- |
@@ -91,7 +91,7 @@ curl -fsS http://localhost:8080/api/v1/projects \
 
 ## Unified Search API
 
-Search a project's active local Git and GitHub snapshots and its standalone Markdown documents with `GET /api/v1/projects/:id/search`.
+Search a project's active Git snapshots and its project- and repository-level Markdown documents with `GET /api/v1/projects/:id/search`.
 
 ```sh
 curl -G "http://localhost:8080/api/v1/projects/$PROJECT_ID/search" \
@@ -104,10 +104,12 @@ curl -G "http://localhost:8080/api/v1/projects/$PROJECT_ID/search" \
 
 - `q` is required and defaults to a maximum of 200 characters. Use quotes for phrases, `OR` for alternatives, and a minus sign to exclude a term.
 - `source_type` accepts `local_git`, `github`, and `document`. Repeat the parameter or separate the values with commas. By default, all source types are included.
-- `repository_id` and `path_prefix` restrict results to files in a specific repository and to paths beginning with a literal prefix. Either filter excludes standalone documents.
+- Use `GET /api/v1/projects/:id/repositories/:repoId/search` or pass `repository_id` to project search to retrieve a single repository’s files and documents.
+- Use `scope=project` for project-level documents. Use `scope=cross_repository` to search repositories explicitly, with optional `repository_ids` (repeat the parameter or use comma-separated IDs) and `repository_role=primary|reference`. Either repository filter also selects cross-repository search. Add `include_project_documents=true` to include project-level documents in those results.
+- `path_prefix` limits results to files whose paths begin with the literal prefix. A repository ID outside the project returns `404`.
 - `limit` defaults to 20 and accepts up to 100. `offset` defaults to zero. Pages include the full match `total` and an empty `items` array when the offset is beyond the last match.
 
-Each hit has a relevance score, a snippet with HTML-escaped text and `<mark>` highlights, and a `location.api_path` to fetch the full content. File locations include repository, snapshot, commit, and path information. GitHub hits include a link pinned to the indexed commit. Document locations include the document ID, title, and version. A content match includes its first matching line when available.
+Each hit has a relevance score, a snippet with HTML-escaped text and `<mark>` highlights, and a `location.api_path` to fetch the full content. File locations include repository, snapshot, commit, and path information. GitHub hits include a link pinned to the indexed commit. Locations include `scope` and, for repository-owned results, `repository_id`, `repository_name`, `repository_role`, and `repository_source`. Document locations also include the document ID, title, and version. A content match includes its first matching line when available.
 
 Redis is enabled by default. Compose starts Redis, publishes port 6379 by default (`REDIS_PORT`), and connects the API to `redis:6379`. A server running on the host uses `localhost:6379` by default. If you use `.env.example` as a Compose environment file, set `REDIS_ADDR=redis:6379` for the container. Set `REDIS_ENABLED=false` to bypass the cache, or configure `REDIS_*` and `SEARCH_*` using the values in `.env.example`. Cached results expire after five minutes by default. Search reads the project's version from PostgreSQL so writes that change searchable content or provenance invalidate older results. Responses include `X-Search-Version` and `X-Search-Cache`, whose value is `hit`, `miss`, `bypass`, or `degraded`. Redis errors fall back to PostgreSQL and are reported as `checks.redis=degraded` at `/readyz`.
 
@@ -115,7 +117,9 @@ With `TEST_DATABASE_URL` set, the search integration tests use an in-process Red
 
 ## Markdown Documents API
 
-A project can store Markdown documents independently of its Git repositories. Set the base path to `/api/v1/projects/{projectId}/documents`. Deleting a project also deletes its documents.
+Markdown documents are owned by the project or by one of its repositories. At `/api/v1/projects/{projectId}/documents`, omit `repository_id` on create for a project-level document, or supply it for a repository-owned document. The response reports `scope` as `project` or `repository`.
+
+The project list includes both scopes by default. Filter with `scope=project`, `scope=repository`, or `repository_id=<uuid>`. A repository ID is incompatible with `scope=project`. Use `/api/v1/projects/{projectId}/repositories/{repoId}/documents` as the base path to create, list, read, update, and delete documents owned by one repository. The repository is taken from the path on create. Requests for repositories or documents outside the specified scope return `404`.
 
 | Method | Path relative to base | Behavior |
 | --- | --- | --- |
@@ -141,19 +145,21 @@ Titles are trimmed and must contain 1 to 200 characters. Markdown content may be
 
 ## Repository Association API
 
-A project can associate local Git working trees and public GitHub repositories. The same repository can be associated with different projects. Within one project, symlink aliases for local paths and equivalent GitHub URLs resolve to the same canonical source.
+A project can associate local Git working trees and public GitHub repositories. Set `role` to `primary` (the default) or `reference`. A project can have multiple repositories of either role. Local and GitHub associations keep independent snapshots, history, activity, and notes even when they share a name, remote URL, or commit SHA. The same repository can be associated with different projects. Within one project, symlink aliases for local paths and equivalent GitHub URLs resolve to the same canonical source.
 
 | Method | Path under `/api/v1/projects/:id` | Result |
 | --- | --- | --- |
 | POST | `/repositories` | Associate a repository and return 201 |
-| GET | `/repositories` | List repositories with optional `source_type`, `limit` (default 20, maximum 100), and `offset` (default 0) |
+| GET | `/repositories` | List repositories with optional `role`, `source_type`, `limit` (default 20, maximum 100), and `offset` (default 0) |
 | GET | `/repositories/:repoId` | Get repository metadata |
-| PATCH | `/repositories/:repoId` | Update `name`, `description`, or both |
+| PATCH | `/repositories/:repoId` | Update `name`, `description`, or `role` |
 | POST | `/repositories/:repoId/sync` | Queue a snapshot (optional JSON `{"ref":"main"}`). Poll the returned `poll_url`. Same active ref returns 200, conflicting ref returns 409. |
 | POST | `/repositories/:repoId/refresh-metadata` | Refresh source metadata and set `last_synced_at`, preserving the name and description |
 | DELETE | `/repositories/:repoId` | Remove the association and return 204 |
 
-POST takes a `source_type` of `local_git` or `github`, a `source`, and optional `name` and `description`. For GitHub, use a public repository URL such as `https://github.com/owner/repo`. For local Git, use an absolute path to the root of a readable working tree. The server needs Git installed and access to the path. In Docker Compose, bind-mount the repositories and set the allowed roots to their paths inside the container. Local associations are forbidden by default.
+Disassociation deletes that repository’s snapshots, files, history, GitHub activity, sync policies, and documents. Pending jobs for the repository are cancelled and running jobs receive a cancellation request. The project’s search cache is invalidated. Project-level documents and data owned by other repositories are preserved.
+
+POST takes a `source_type` of `local_git` or `github`, a `source`, and optional `name`, `description`, and `role`. For GitHub, use a public repository URL such as `https://github.com/owner/repo`. For local Git, use an absolute path to the root of a readable working tree. The server needs Git installed and access to the path. In Docker Compose, bind-mount the repositories and set the allowed roots to their paths inside the container. Local associations are forbidden by default.
 
 ```sh
 curl -fsS "http://localhost:8080/api/v1/projects/$PROJECT_ID/repositories" \

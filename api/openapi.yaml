@@ -262,6 +262,7 @@ paths:
         - {"$ref": "#/components/parameters/Limit"}
         - {"$ref": "#/components/parameters/Offset"}
         - {"name": "source_type", "in": "query", "schema": {"type": "string", "enum": ["local_git", "github"]}}
+        - {"name": "role", "in": "query", "schema": {"$ref": "#/components/schemas/RepositoryRole"}}
       responses:
         "200":
           description: "Successful response"
@@ -338,7 +339,7 @@ paths:
         "504": {"$ref": "#/components/responses/RequestTimeout"}
     patch:
       operationId: "patchRepository"
-      summary: "Update repository name or description"
+      summary: "Update repository name, description, or role"
       security:
         - {"BearerAuth": []}
       requestBody:
@@ -366,7 +367,8 @@ paths:
         "504": {"$ref": "#/components/responses/RequestTimeout"}
     delete:
       operationId: "deleteRepository"
-      summary: "Delete a repository"
+      summary: "Disassociate a repository"
+      description: "Removes repository-owned data and requests cancellation of active jobs targeting the repository."
       security:
         - {"BearerAuth": []}
       responses:
@@ -562,11 +564,14 @@ paths:
     get:
       operationId: "listDocuments"
       summary: "List document summaries"
+      description: "By default, returns project-level and repository-owned summaries. Project scope cannot be combined with repository_id."
       security:
         - {"BearerAuth": []}
       parameters:
         - {"$ref": "#/components/parameters/Limit"}
         - {"$ref": "#/components/parameters/Offset"}
+        - {"$ref": "#/components/parameters/DocumentScope"}
+        - {"$ref": "#/components/parameters/RepositoryIDFilter"}
       responses:
         "200":
           description: "Successful response"
@@ -731,6 +736,187 @@ paths:
         "500": {"$ref": "#/components/responses/InternalError"}
         "503": {"$ref": "#/components/responses/ServiceUnavailable"}
         "504": {"$ref": "#/components/responses/RequestTimeout"}
+  "/api/v1/projects/{id}/repositories/{repoId}/documents":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+    get:
+      operationId: "listRepositoryDocuments"
+      summary: "List documents owned by a repository"
+      description: "If supplied, scope must be repository and repository_id must match the path."
+      security:
+        - {"BearerAuth": []}
+      parameters:
+        - {"$ref": "#/components/parameters/Limit"}
+        - {"$ref": "#/components/parameters/Offset"}
+        - {"$ref": "#/components/parameters/DocumentScope"}
+        - {"$ref": "#/components/parameters/RepositoryIDFilter"}
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/DocumentListResult"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+    post:
+      operationId: "createRepositoryDocument"
+      summary: "Create a repository-owned Markdown document"
+      description: "The path selects the repository. If supplied, body repository_id must match the path."
+      security:
+        - {"BearerAuth": []}
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema: {"$ref": "#/components/schemas/DocumentInput"}
+      responses:
+        "201":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+            ETag:
+              description: "Strong, quoted document version."
+              schema: {"type": "string", "example": "\"1\""}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/Document"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+  "/api/v1/projects/{id}/repositories/{repoId}/documents/{docId}":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+      - {"$ref": "#/components/parameters/docId"}
+    get:
+      operationId: "getRepositoryDocument"
+      summary: "Read a Markdown document"
+      security:
+        - {"BearerAuth": []}
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+            ETag:
+              description: "Strong, quoted document version."
+              schema: {"type": "string", "example": "\"1\""}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/Document"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+    put:
+      operationId: "replaceRepositoryDocument"
+      summary: "Replace a Markdown document"
+      security:
+        - {"BearerAuth": []}
+      parameters:
+        - {"$ref": "#/components/parameters/IfMatch"}
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema: {"$ref": "#/components/schemas/DocumentUpdate"}
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+            ETag:
+              description: "Strong, quoted document version."
+              schema: {"type": "string", "example": "\"1\""}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/Document"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "409": {"$ref": "#/components/responses/Conflict"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+    patch:
+      operationId: "patchRepositoryDocument"
+      summary: "Update selected document fields"
+      security:
+        - {"BearerAuth": []}
+      parameters:
+        - {"$ref": "#/components/parameters/IfMatch"}
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema: {"$ref": "#/components/schemas/DocumentPatch"}
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+            ETag:
+              description: "Strong, quoted document version."
+              schema: {"type": "string", "example": "\"1\""}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/Document"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "409": {"$ref": "#/components/responses/Conflict"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+    delete:
+      operationId: "deleteRepositoryDocument"
+      summary: "Delete a Markdown document"
+      security:
+        - {"BearerAuth": []}
+      parameters:
+        - {"$ref": "#/components/parameters/IfMatch"}
+      responses:
+        "204":
+          description: "No content"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "409": {"$ref": "#/components/responses/Conflict"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
   "/api/v1/projects/{id}/search":
     parameters:
       - {"$ref": "#/components/parameters/id"}
@@ -742,7 +928,52 @@ paths:
       parameters:
         - {"name": "q", "in": "query", "required": true, "schema": {"type": "string", "minLength": 1}}
         - {"name": "source_type", "in": "query", "schema": {"type": "array", "items": {"type": "string", "enum": ["local_git", "github", "document"]}}, "style": "form", "explode": true, "description": "Repeat this parameter or supply comma-separated source types."}
-        - {"name": "repository_id", "in": "query", "schema": {"type": "string", "format": "uuid"}}
+        - {"$ref": "#/components/parameters/RepositoryIDFilter"}
+        - {"name": "scope", "in": "query", "schema": {"$ref": "#/components/schemas/SearchScope"}, "description": "Defaults to all content. Use project for project documents only, repository with repository_id, or cross_repository to select repositories explicitly."}
+        - {"name": "repository_ids", "in": "query", "schema": {"type": "array", "items": {"type": "string", "format": "uuid"}}, "style": "form", "explode": true, "description": "Cross-repository selection. Repeat the parameter or supply comma-separated UUIDs."}
+        - {"name": "repository_role", "in": "query", "schema": {"$ref": "#/components/schemas/RepositoryRole"}, "description": "Cross-repository selection by role."}
+        - {"name": "include_project_documents", "in": "query", "schema": {"type": "boolean", "default": false}, "description": "Include project-level documents in cross-repository search."}
+        - {"name": "path_prefix", "in": "query", "schema": {"type": "string"}}
+        - {"$ref": "#/components/parameters/Limit"}
+        - {"$ref": "#/components/parameters/Offset"}
+      responses:
+        "200":
+          description: "Successful response"
+          headers:
+            X-Request-ID:
+              description: "Request correlation ID."
+              schema: {"type": "string"}
+            X-Search-Cache:
+              description: "Cache outcome."
+              schema: {"type": "string", "enum": ["hit", "miss", "bypass", "degraded"]}
+            X-Search-Version:
+              description: "Project search version for cache invalidation."
+              schema: {"type": "integer", "format": "int64"}
+          content:
+            "application/json":
+              schema: {"$ref": "#/components/schemas/SearchResult"}
+        "400": {"$ref": "#/components/responses/BadRequest"}
+        "401": {"$ref": "#/components/responses/Unauthorized"}
+        "404": {"$ref": "#/components/responses/NotFound"}
+        "413": {"$ref": "#/components/responses/PayloadTooLarge"}
+        "500": {"$ref": "#/components/responses/InternalError"}
+        "503": {"$ref": "#/components/responses/ServiceUnavailable"}
+        "504": {"$ref": "#/components/responses/RequestTimeout"}
+  "/api/v1/projects/{id}/repositories/{repoId}/search":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+    get:
+      operationId: "searchRepository"
+      summary: "Search one repository’s active files and Markdown documents"
+      description: "If supplied, scope must be repository and repository_id must match the path."
+      security:
+        - {"BearerAuth": []}
+      parameters:
+        - {"name": "q", "in": "query", "required": true, "schema": {"type": "string", "minLength": 1}}
+        - {"name": "source_type", "in": "query", "schema": {"type": "array", "items": {"type": "string", "enum": ["local_git", "github", "document"]}}, "style": "form", "explode": true, "description": "Repeat this parameter or supply comma-separated source types."}
+        - {"$ref": "#/components/parameters/RepositoryIDFilter"}
+        - {"name": "scope", "in": "query", "schema": {"type": "string", "enum": ["repository"]}}
         - {"name": "path_prefix", "in": "query", "schema": {"type": "string"}}
         - {"$ref": "#/components/parameters/Limit"}
         - {"$ref": "#/components/parameters/Offset"}
@@ -1274,6 +1505,14 @@ components:
       name: "offset"
       in: "query"
       schema: {"type": "integer", "minimum": 0}
+    DocumentScope:
+      name: "scope"
+      in: "query"
+      schema: {"$ref": "#/components/schemas/KnowledgeScope"}
+    RepositoryIDFilter:
+      name: "repository_id"
+      in: "query"
+      schema: {"type": "string", "format": "uuid"}
     IfMatch:
       name: "If-Match"
       in: "header"
@@ -1551,6 +1790,9 @@ components:
         message: {"type": "string", "example": "pong"}
     ProjectStatus: {"type": "string", "enum": ["active", "archived"]}
     RepositorySourceType: {"type": "string", "enum": ["local_git", "github"]}
+    RepositoryRole: {"type": "string", "enum": ["primary", "reference"]}
+    KnowledgeScope: {"type": "string", "enum": ["project", "repository"]}
+    SearchScope: {"type": "string", "enum": ["all", "project", "repository", "cross_repository"]}
     SnapshotStatus: {"type": "string", "enum": ["staging", "active", "superseded", "failed"]}
     JobStatus: {"type": "string", "enum": ["pending", "running", "succeeded", "failed", "cancelled"]}
     SearchHitKind: {"type": "string", "enum": ["source_file", "document"]}
@@ -1602,6 +1844,8 @@ components:
       type: "object"
       required: ["api_path"]
       properties:
+        scope: {"$ref": "#/components/schemas/KnowledgeScope"}
+        repository_role: {"$ref": "#/components/schemas/RepositoryRole"}
         repository_id: {"type": "string", "format": "uuid"}
         repository_name: {"type": "string"}
         repository_source: {"type": "string"}
@@ -1641,8 +1885,10 @@ components:
         cache_status: {"$ref": "#/components/schemas/SearchCacheStatus"}
     Document:
       type: "object"
-      required: ["id", "project_id", "title", "content", "content_bytes", "version", "created_at", "updated_at"]
+      required: ["id", "project_id", "scope", "title", "content", "content_bytes", "version", "created_at", "updated_at"]
       properties:
+        scope: {"$ref": "#/components/schemas/KnowledgeScope"}
+        repository_id: {"type": "string", "format": "uuid"}
         id: {"type": "string", "format": "uuid"}
         project_id: {"type": "string", "format": "uuid"}
         title: {"type": "string"}
@@ -1653,8 +1899,10 @@ components:
         updated_at: {"type": "string", "format": "date-time"}
     DocumentSummary:
       type: "object"
-      required: ["id", "project_id", "title", "content_bytes", "version", "created_at", "updated_at"]
+      required: ["id", "project_id", "scope", "title", "content_bytes", "version", "created_at", "updated_at"]
       properties:
+        scope: {"$ref": "#/components/schemas/KnowledgeScope"}
+        repository_id: {"type": "string", "format": "uuid"}
         id: {"type": "string", "format": "uuid"}
         project_id: {"type": "string", "format": "uuid"}
         title: {"type": "string"}
@@ -1666,6 +1914,7 @@ components:
       type: "object"
       required: ["title"]
       properties:
+        repository_id: {"type": "string", "format": "uuid", "nullable": true, "description": "Omit or use null for a project-level document on the project route."}
         title: {"type": "string"}
         content: {"type": "string"}
       additionalProperties: false
@@ -1810,8 +2059,9 @@ components:
         offset: {"type": "integer"}
     Repository:
       type: "object"
-      required: ["id", "project_id", "source_type", "name", "source", "canonical_source", "default_branch", "description", "created_at", "updated_at"]
+      required: ["id", "project_id", "source_type", "role", "name", "source", "canonical_source", "default_branch", "description", "created_at", "updated_at"]
       properties:
+        role: {"$ref": "#/components/schemas/RepositoryRole"}
         id: {"type": "string", "format": "uuid"}
         project_id: {"type": "string", "format": "uuid"}
         source_type: {"$ref": "#/components/schemas/RepositorySourceType"}
@@ -1835,6 +2085,7 @@ components:
       type: "object"
       required: ["source_type", "source"]
       properties:
+        role: {"type": "string", "enum": ["primary", "reference"], "default": "primary", "nullable": true}
         source_type: {"$ref": "#/components/schemas/RepositorySourceType"}
         source:
           type: "string"
@@ -1845,6 +2096,7 @@ components:
     RepositoryPatch:
       type: "object"
       properties:
+        role: {"$ref": "#/components/schemas/RepositoryRole"}
         name: {"type": "string"}
         description: {"type": "string"}
       additionalProperties: false

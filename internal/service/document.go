@@ -15,11 +15,11 @@ import (
 
 type DocumentStore interface {
 	Create(context.Context, domain.Document) (domain.Document, error)
-	GetByID(context.Context, uuid.UUID, uuid.UUID) (domain.Document, error)
+	GetScopedByID(context.Context, uuid.UUID, uuid.UUID, *uuid.UUID) (domain.Document, error)
 	ListByProject(context.Context, uuid.UUID, domain.ListDocumentsFilter) (domain.DocumentListResult, error)
-	Update(context.Context, uuid.UUID, uuid.UUID, int64, string, string) (domain.Document, error)
-	Patch(context.Context, uuid.UUID, uuid.UUID, int64, *string, *string) (domain.Document, error)
-	Delete(context.Context, uuid.UUID, uuid.UUID, *int64) error
+	Update(context.Context, uuid.UUID, uuid.UUID, *uuid.UUID, int64, string, string) (domain.Document, error)
+	Patch(context.Context, uuid.UUID, uuid.UUID, *uuid.UUID, int64, *string, *string) (domain.Document, error)
+	Delete(context.Context, uuid.UUID, uuid.UUID, *uuid.UUID, *int64) error
 }
 
 type DocumentService struct {
@@ -103,8 +103,10 @@ func (s *DocumentService) Create(ctx context.Context, rawProjectID string, input
 	if err != nil {
 		return domain.Document{}, err
 	}
-	// The project can disappear between the existence check and the insert.
-	return s.store.Create(ctx, domain.Document{ID: uuid.New(), ProjectID: projectID, Title: *title, Content: input.Content})
+	return s.store.Create(ctx, domain.Document{
+		ID: uuid.New(), ProjectID: projectID, Title: *title, Content: input.Content,
+		RepositoryID: input.RepositoryID, Scope: domain.DocumentScope(input.RepositoryID),
+	})
 }
 
 func (s *DocumentService) ListByProject(ctx context.Context, rawProjectID string, filter domain.ListDocumentsFilter) (domain.DocumentListResult, error) {
@@ -118,19 +120,28 @@ func (s *DocumentService) ListByProject(ctx context.Context, rawProjectID string
 	if filter.Limit < 1 || filter.Limit > 100 || filter.Offset < 0 {
 		return domain.DocumentListResult{}, fmt.Errorf("%w: limit must be between 1 and 100 and offset must be nonnegative", domain.ErrInvalidInput)
 	}
+	switch filter.Scope {
+	case domain.KnowledgeScopeProject:
+		if filter.RepositoryID != nil {
+			return domain.DocumentListResult{}, fmt.Errorf("%w: project scope cannot be combined with repository_id", domain.ErrInvalidInput)
+		}
+	case "", domain.KnowledgeScopeRepository:
+	default:
+		return domain.DocumentListResult{}, fmt.Errorf("%w: scope must be project or repository", domain.ErrInvalidInput)
+	}
 	return s.store.ListByProject(ctx, projectID, filter)
 }
 
-func (s *DocumentService) GetByID(ctx context.Context, rawProjectID, rawDocID string) (domain.Document, error) {
+func (s *DocumentService) GetByID(ctx context.Context, rawProjectID, rawDocID string, repositoryID *uuid.UUID) (domain.Document, error) {
 	projectID, docID, err := s.documentIDs(ctx, rawProjectID, rawDocID)
 	if err != nil {
 		return domain.Document{}, err
 	}
-	doc, err := s.store.GetByID(ctx, projectID, docID)
+	doc, err := s.store.GetScopedByID(ctx, projectID, docID, repositoryID)
 	return doc, documentError(err)
 }
 
-func (s *DocumentService) Update(ctx context.Context, rawProjectID, rawDocID string, input domain.UpdateDocumentInput) (domain.Document, error) {
+func (s *DocumentService) Update(ctx context.Context, rawProjectID, rawDocID string, repositoryID *uuid.UUID, input domain.UpdateDocumentInput) (domain.Document, error) {
 	projectID, docID, err := s.documentIDs(ctx, rawProjectID, rawDocID)
 	if err != nil {
 		return domain.Document{}, err
@@ -142,11 +153,11 @@ func (s *DocumentService) Update(ctx context.Context, rawProjectID, rawDocID str
 	if err != nil {
 		return domain.Document{}, err
 	}
-	doc, err := s.store.Update(ctx, projectID, docID, input.Version, *title, input.Content)
+	doc, err := s.store.Update(ctx, projectID, docID, repositoryID, input.Version, *title, input.Content)
 	return doc, documentError(err)
 }
 
-func (s *DocumentService) Patch(ctx context.Context, rawProjectID, rawDocID string, input domain.PatchDocumentInput) (domain.Document, error) {
+func (s *DocumentService) Patch(ctx context.Context, rawProjectID, rawDocID string, repositoryID *uuid.UUID, input domain.PatchDocumentInput) (domain.Document, error) {
 	projectID, docID, err := s.documentIDs(ctx, rawProjectID, rawDocID)
 	if err != nil {
 		return domain.Document{}, err
@@ -161,11 +172,11 @@ func (s *DocumentService) Patch(ctx context.Context, rawProjectID, rawDocID stri
 	if err != nil {
 		return domain.Document{}, err
 	}
-	doc, err := s.store.Patch(ctx, projectID, docID, input.Version, title, input.Content)
+	doc, err := s.store.Patch(ctx, projectID, docID, repositoryID, input.Version, title, input.Content)
 	return doc, documentError(err)
 }
 
-func (s *DocumentService) Delete(ctx context.Context, rawProjectID, rawDocID string, expectedVersion *int64) error {
+func (s *DocumentService) Delete(ctx context.Context, rawProjectID, rawDocID string, repositoryID *uuid.UUID, expectedVersion *int64) error {
 	projectID, docID, err := s.documentIDs(ctx, rawProjectID, rawDocID)
 	if err != nil {
 		return err
@@ -175,5 +186,5 @@ func (s *DocumentService) Delete(ctx context.Context, rawProjectID, rawDocID str
 			return err
 		}
 	}
-	return documentError(s.store.Delete(ctx, projectID, docID, expectedVersion))
+	return documentError(s.store.Delete(ctx, projectID, docID, repositoryID, expectedVersion))
 }

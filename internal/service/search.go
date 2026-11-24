@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -22,6 +23,10 @@ import (
 type SearchStore interface {
 	GetProjectSearchVersion(context.Context, uuid.UUID) (int64, error)
 	Search(context.Context, uuid.UUID, domain.SearchFilter) (domain.SearchResult, error)
+}
+
+type searchRepositoryOwnershipValidator interface {
+	ValidateRepositoryOwnership(context.Context, uuid.UUID, []uuid.UUID) error
 }
 
 type SearchCache interface {
@@ -64,9 +69,23 @@ func (s *SearchService) Search(ctx context.Context, rawProjectID string, filter 
 		return domain.SearchResult{}, err
 	}
 
+	// Read the version before validating ownership so a concurrent deletion cannot
+	// leave a validated repository paired with a newer cache version.
 	version, err := s.store.GetProjectSearchVersion(ctx, projectID)
 	if err != nil {
 		return domain.SearchResult{}, err
+	}
+
+	if validator, ok := s.store.(searchRepositoryOwnershipValidator); ok {
+		requested := filter.RepositoryIDs
+		if filter.RepositoryID != nil {
+			requested = []uuid.UUID{*filter.RepositoryID}
+		}
+		if len(requested) > 0 {
+			if err := validator.ValidateRepositoryOwnership(ctx, projectID, requested); err != nil {
+				return domain.SearchResult{}, err
+			}
+		}
 	}
 
 	status := domain.SearchCacheStatusBypass
@@ -137,6 +156,36 @@ func (s *SearchService) normalizeFilter(filter domain.SearchFilter) (domain.Sear
 			return filter, fmt.Errorf("%w: invalid source_type %q", domain.ErrInvalidInput, source)
 		}
 	}
+	if filter.RepositoryRole != "" && !filter.RepositoryRole.Valid() {
+		return filter, fmt.Errorf("%w: repository_role must be primary or reference", domain.ErrInvalidInput)
+	}
+	filter.Scope = filter.EffectiveScope()
+	switch filter.Scope {
+	case domain.SearchScopeAll:
+	case domain.SearchScopeProject:
+		if filter.RepositoryID != nil || len(filter.RepositoryIDs) > 0 || filter.RepositoryRole != "" {
+			return filter, fmt.Errorf("%w: project scope cannot be combined with repository filters", domain.ErrInvalidInput)
+		}
+	case domain.SearchScopeRepository:
+		if filter.RepositoryID == nil || len(filter.RepositoryIDs) > 0 || filter.RepositoryRole != "" {
+			return filter, fmt.Errorf("%w: repository scope requires repository_id and disallows repository_ids and repository_role", domain.ErrInvalidInput)
+		}
+	case domain.SearchScopeCrossRepository:
+		if filter.RepositoryID != nil {
+			return filter, fmt.Errorf("%w: cross_repository scope cannot be combined with repository_id", domain.ErrInvalidInput)
+		}
+	default:
+		return filter, fmt.Errorf("%w: invalid scope %q", domain.ErrInvalidInput, filter.Scope)
+	}
+	if filter.Scope != domain.SearchScopeCrossRepository {
+		filter.IncludeProjectDocuments = false
+	}
+	filter.RepositoryIDs = slices.Clone(filter.RepositoryIDs)
+	slices.SortFunc(filter.RepositoryIDs, func(a, b uuid.UUID) int { return bytes.Compare(a[:], b[:]) })
+	filter.RepositoryIDs = slices.Compact(filter.RepositoryIDs)
+	if len(filter.RepositoryIDs) == 0 {
+		filter.RepositoryIDs = nil
+	}
 	filter.SourceTypes = slices.Clone(filter.SourceTypes)
 	slices.Sort(filter.SourceTypes)
 	filter.SourceTypes = slices.Compact(filter.SourceTypes)
@@ -147,7 +196,6 @@ func (s *SearchService) normalizeFilter(filter domain.SearchFilter) (domain.Sear
 }
 
 func searchCacheKey(prefix string, projectID uuid.UUID, version int64, filter domain.SearchFilter) string {
-	// SearchFilter contains strings, a UUID, and integers, all JSON encodable.
 	canonical, _ := json.Marshal(filter)
-	return fmt.Sprintf("%s:search:v1:p:%s:ver:%d:q:%x", prefix, projectID, version, sha256.Sum256(canonical))
+	return fmt.Sprintf("%s:search:v2:p:%s:ver:%d:q:%x", prefix, projectID, version, sha256.Sum256(canonical))
 }

@@ -111,7 +111,7 @@ func TestRepositoryHandlerManagement(t *testing.T) {
 	}
 	service := repositoryHandlerService{
 		list: func(project string, filter domain.ListRepositoriesFilter) (domain.RepositoryListResult, error) {
-			want := domain.ListRepositoriesFilter{SourceType: domain.RepositorySourceGitHub, Limit: 3, Offset: 6}
+			want := domain.ListRepositoriesFilter{SourceType: domain.RepositorySourceGitHub, Role: domain.RepositoryRoleReference, Limit: 3, Offset: 6}
 			if project != "project" || filter != want {
 				t.Fatalf("unexpected list arguments %q %+v", project, filter)
 			}
@@ -123,7 +123,7 @@ func TestRepositoryHandlerManagement(t *testing.T) {
 		},
 		patch: func(project, repo string, input domain.PatchRepositoryInput) (domain.Repository, error) {
 			checkIDs(project, repo)
-			if input.Name == nil || *input.Name != "renamed" || input.Description != nil {
+			if input.Name == nil || *input.Name != "renamed" || input.Description != nil || input.Role == nil || *input.Role != domain.RepositoryRolePrimary {
 				t.Fatalf("unexpected patch %+v", input)
 			}
 			return domain.Repository{Name: *input.Name}, nil
@@ -143,9 +143,12 @@ func TestRepositoryHandlerManagement(t *testing.T) {
 		method, suffix, body, fragment string
 		status                         int
 	}{
-		{"GET", "?source_type=github&limit=3&offset=6", "", `"total":5`, 200},
+		{"GET", "?source_type=github&role=reference&limit=3&offset=6", "", `"total":5`, 200},
+		{"GET", "?role=", "", `"code":"invalid_input"`, 400},
+		{"GET", "?role=bad", "", `"code":"invalid_input"`, 400},
+		{"GET", "?role=primary&role=reference", "", `"code":"invalid_input"`, 400},
 		{"GET", "/repo", "", `"name":"original"`, 200},
-		{"PATCH", "/repo", `{"name":"renamed"}`, `"name":"renamed"`, 200},
+		{"PATCH", "/repo", `{"name":"renamed","role":"primary"}`, `"name":"renamed"`, 200},
 		{"POST", "/repo/refresh-metadata", "", `"default_branch":"updated"`, 200},
 		{"DELETE", "/repo", "", "", 204},
 	} {

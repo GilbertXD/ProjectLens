@@ -6,30 +6,49 @@ import (
 	"github.com/google/uuid"
 )
 
+type KnowledgeScope string
+
+const (
+	KnowledgeScopeProject    KnowledgeScope = "project"
+	KnowledgeScopeRepository KnowledgeScope = "repository"
+)
+
+func DocumentScope(repositoryID *uuid.UUID) KnowledgeScope {
+	if repositoryID != nil {
+		return KnowledgeScopeRepository
+	}
+	return KnowledgeScopeProject
+}
+
 type Document struct {
-	ID           uuid.UUID `json:"id"`
-	ProjectID    uuid.UUID `json:"project_id"`
-	Title        string    `json:"title"`
-	Content      string    `json:"content"`
-	ContentBytes int64     `json:"content_bytes"`
-	Version      int64     `json:"version"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID           uuid.UUID      `json:"id"`
+	ProjectID    uuid.UUID      `json:"project_id"`
+	Scope        KnowledgeScope `json:"scope"`
+	RepositoryID *uuid.UUID     `json:"repository_id,omitempty"`
+	Title        string         `json:"title"`
+	Content      string         `json:"content"`
+	ContentBytes int64          `json:"content_bytes"`
+	Version      int64          `json:"version"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
 }
 
 type DocumentSummary struct {
-	ID           uuid.UUID `json:"id"`
-	ProjectID    uuid.UUID `json:"project_id"`
-	Title        string    `json:"title"`
-	ContentBytes int64     `json:"content_bytes"`
-	Version      int64     `json:"version"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID           uuid.UUID      `json:"id"`
+	ProjectID    uuid.UUID      `json:"project_id"`
+	Scope        KnowledgeScope `json:"scope"`
+	RepositoryID *uuid.UUID     `json:"repository_id,omitempty"`
+	Title        string         `json:"title"`
+	ContentBytes int64          `json:"content_bytes"`
+	Version      int64          `json:"version"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
 }
 
 type CreateDocumentInput struct {
-	Title   string `json:"title"`
-	Content string `json:"content"`
+	RepositoryID *uuid.UUID `json:"repository_id,omitempty"`
+	Title        string     `json:"title"`
+	Content      string     `json:"content"`
 }
 
 type UpdateDocumentInput struct {
@@ -45,8 +64,10 @@ type PatchDocumentInput struct {
 }
 
 type ListDocumentsFilter struct {
-	Limit  int
-	Offset int
+	Scope        KnowledgeScope
+	RepositoryID *uuid.UUID
+	Limit        int
+	Offset       int
 }
 
 type DocumentListResult struct {

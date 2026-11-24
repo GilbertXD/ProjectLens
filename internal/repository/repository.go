@@ -21,13 +21,13 @@ func NewPostgresRepositoryStore(pool *pgxpool.Pool) *PostgresRepositoryStore {
 	return &PostgresRepositoryStore{pool: pool}
 }
 
-const repositoryColumns = "id, project_id, source_type, name, source, canonical_source, default_branch, description, remote_url, local_path, github_owner, github_repo, github_repo_id, github_visibility, github_stars, github_language, last_synced_at, created_at, updated_at"
+const repositoryColumns = "id, project_id, source_type, name, source, canonical_source, default_branch, description, remote_url, local_path, github_owner, github_repo, github_repo_id, github_visibility, github_stars, github_language, last_synced_at, created_at, updated_at, role"
 
 func repositoryDestinations(repo *domain.Repository) []any {
 	return []any{&repo.ID, &repo.ProjectID, &repo.SourceType, &repo.Name, &repo.Source, &repo.CanonicalSource,
 		&repo.DefaultBranch, &repo.Description, &repo.RemoteURL, &repo.LocalPath, &repo.GitHubOwner, &repo.GitHubRepo,
 		&repo.GitHubRepoID, &repo.GitHubVisibility, &repo.GitHubStars, &repo.GitHubLanguage, &repo.LastSyncedAt,
-		&repo.CreatedAt, &repo.UpdatedAt}
+		&repo.CreatedAt, &repo.UpdatedAt, &repo.Role}
 }
 
 func scanRepository(row pgx.Row) (domain.Repository, error) {
@@ -40,11 +40,11 @@ func (r *PostgresRepositoryStore) Create(ctx context.Context, repo domain.Reposi
 	return scanRepository(db.ConnFromContext(ctx, r.pool).QueryRow(ctx, `
  INSERT INTO repositories (id, project_id, source_type, name, source, canonical_source, default_branch,
   description, remote_url, local_path, github_owner, github_repo, github_repo_id, github_visibility,
-  github_stars, github_language, last_synced_at)
- VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+  github_stars, github_language, last_synced_at, role)
+ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,COALESCE(NULLIF($18, ''), 'primary'))
  RETURNING `+repositoryColumns, repo.ID, repo.ProjectID, repo.SourceType, repo.Name, repo.Source, repo.CanonicalSource,
 		repo.DefaultBranch, repo.Description, repo.RemoteURL, repo.LocalPath, repo.GitHubOwner, repo.GitHubRepo,
-		repo.GitHubRepoID, repo.GitHubVisibility, repo.GitHubStars, repo.GitHubLanguage, repo.LastSyncedAt))
+		repo.GitHubRepoID, repo.GitHubVisibility, repo.GitHubStars, repo.GitHubLanguage, repo.LastSyncedAt, repo.Role))
 }
 
 func (r *PostgresRepositoryStore) GetByID(ctx context.Context, projectID, repoID uuid.UUID) (domain.Repository, error) {
@@ -62,13 +62,13 @@ func (r *PostgresRepositoryStore) ListByProject(ctx context.Context, projectID u
 	// The count-only row preserves total on empty pages. The two reads share a statement snapshot.
 	rows, err := db.ConnFromContext(ctx, r.pool).Query(ctx, `
  WITH matching AS NOT MATERIALIZED (
-  SELECT `+repositoryColumns+` FROM repositories WHERE project_id = $1 AND ($2 = '' OR source_type = $2)
+  SELECT `+repositoryColumns+` FROM repositories WHERE project_id = $1 AND ($2 = '' OR source_type = $2) AND ($5 = '' OR role = $5)
  ), page AS (
   SELECT * FROM matching ORDER BY created_at DESC, id DESC LIMIT $3 OFFSET $4
  )
  SELECT page.*, totals.total
  FROM (SELECT count(*) AS total FROM matching) totals
- LEFT JOIN page ON true ORDER BY page.created_at DESC, page.id DESC`, projectID, filter.SourceType, int64(filter.Limit), int64(filter.Offset))
+ LEFT JOIN page ON true ORDER BY page.created_at DESC, page.id DESC`, projectID, filter.SourceType, int64(filter.Limit), int64(filter.Offset), filter.Role)
 	if err != nil {
 		return result, repositoryError(err)
 	}
@@ -94,8 +94,8 @@ func (r *PostgresRepositoryStore) ListByProject(ctx context.Context, projectID u
 
 func (r *PostgresRepositoryStore) Patch(ctx context.Context, projectID, repoID uuid.UUID, input domain.PatchRepositoryInput) (domain.Repository, error) {
 	return scanRepository(db.ConnFromContext(ctx, r.pool).QueryRow(ctx, `
- UPDATE repositories SET name = COALESCE($3, name), description = COALESCE($4, description), updated_at = NOW()
- WHERE project_id = $1 AND id = $2 RETURNING `+repositoryColumns, projectID, repoID, input.Name, input.Description))
+ UPDATE repositories SET name = COALESCE($3, name), description = COALESCE($4, description), role = COALESCE($5, role), updated_at = NOW()
+ WHERE project_id = $1 AND id = $2 RETURNING `+repositoryColumns, projectID, repoID, input.Name, input.Description, input.Role))
 }
 
 func (r *PostgresRepositoryStore) UpdateMetadata(ctx context.Context, repo domain.Repository) (domain.Repository, error) {
@@ -109,14 +109,27 @@ func (r *PostgresRepositoryStore) UpdateMetadata(ctx context.Context, repo domai
 }
 
 func (r *PostgresRepositoryStore) Delete(ctx context.Context, projectID, repoID uuid.UUID) error {
-	tag, err := db.ConnFromContext(ctx, r.pool).Exec(ctx, "DELETE FROM repositories WHERE project_id = $1 AND id = $2", projectID, repoID)
-	if err != nil {
-		return repositoryError(err)
-	}
-	if tag.RowsAffected() == 0 {
-		return domain.ErrNotFound
-	}
-	return nil
+	err := db.NewPgxTxManager(r.pool).WithinTx(ctx, func(ctx context.Context) error {
+		conn := db.ConnFromContext(ctx, r.pool)
+		tag, err := conn.Exec(ctx, "DELETE FROM repositories WHERE project_id = $1 AND id = $2", projectID, repoID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return domain.ErrNotFound
+		}
+		_, err = conn.Exec(ctx, `
+			UPDATE jobs SET
+				status = CASE WHEN status = 'pending' THEN 'cancelled' ELSE status END,
+				finished_at = CASE WHEN status = 'pending' THEN NOW() ELSE finished_at END,
+				last_error_code = CASE WHEN status = 'pending' THEN 'cancelled' ELSE last_error_code END,
+				last_error = CASE WHEN status = 'pending' THEN 'repository disassociated' ELSE last_error END,
+				cancel_requested_at = CASE WHEN status = 'running' THEN COALESCE(cancel_requested_at, NOW()) ELSE cancel_requested_at END,
+				updated_at = NOW()
+			WHERE lower(payload->>'repository_id') = $1 AND status IN ('pending', 'running')`, repoID.String())
+		return err
+	})
+	return repositoryError(err)
 }
 
 func repositoryError(err error) error {

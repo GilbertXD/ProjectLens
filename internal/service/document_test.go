@@ -30,8 +30,9 @@ func (s *testDocumentStore) Create(_ context.Context, doc domain.Document) (doma
 	return doc, nil
 }
 
-func (s *testDocumentStore) GetByID(_ context.Context, projectID, docID uuid.UUID) (domain.Document, error) {
-	if s.doc.ID != docID || s.doc.ProjectID != projectID {
+func (s *testDocumentStore) GetScopedByID(_ context.Context, projectID, docID uuid.UUID, repositoryID *uuid.UUID) (domain.Document, error) {
+	if s.doc.ID != docID || s.doc.ProjectID != projectID ||
+		(repositoryID != nil && (s.doc.RepositoryID == nil || *s.doc.RepositoryID != *repositoryID)) {
 		return domain.Document{}, domain.ErrNotFound
 	}
 	return s.doc, nil
@@ -41,12 +42,12 @@ func (s *testDocumentStore) ListByProject(_ context.Context, _ uuid.UUID, f doma
 	return domain.DocumentListResult{Limit: f.Limit, Offset: f.Offset}, nil
 }
 
-func (s *testDocumentStore) Update(ctx context.Context, projectID, docID uuid.UUID, version int64, title, content string) (domain.Document, error) {
-	return s.Patch(ctx, projectID, docID, version, &title, &content)
+func (s *testDocumentStore) Update(ctx context.Context, projectID, docID uuid.UUID, repositoryID *uuid.UUID, version int64, title, content string) (domain.Document, error) {
+	return s.Patch(ctx, projectID, docID, repositoryID, version, &title, &content)
 }
 
-func (s *testDocumentStore) Patch(ctx context.Context, projectID, docID uuid.UUID, version int64, title, content *string) (domain.Document, error) {
-	doc, err := s.GetByID(ctx, projectID, docID)
+func (s *testDocumentStore) Patch(ctx context.Context, projectID, docID uuid.UUID, repositoryID *uuid.UUID, version int64, title, content *string) (domain.Document, error) {
+	doc, err := s.GetScopedByID(ctx, projectID, docID, repositoryID)
 	if err != nil {
 		return doc, err
 	}
@@ -64,8 +65,8 @@ func (s *testDocumentStore) Patch(ctx context.Context, projectID, docID uuid.UUI
 	return doc, nil
 }
 
-func (s *testDocumentStore) Delete(ctx context.Context, projectID, docID uuid.UUID, version *int64) error {
-	doc, err := s.GetByID(ctx, projectID, docID)
+func (s *testDocumentStore) Delete(ctx context.Context, projectID, docID uuid.UUID, repositoryID *uuid.UUID, version *int64) error {
+	doc, err := s.GetScopedByID(ctx, projectID, docID, repositoryID)
 	if err != nil {
 		return err
 	}
@@ -100,7 +101,7 @@ func TestDocumentServiceContentAndTitle(t *testing.T) {
 			doc, err := s.Create(t.Context(), project.String(), domain.CreateDocumentInput{Title: tc.title, Content: tc.content})
 			if tc.valid {
 				if err != nil || doc.ProjectID != project || doc.ID == uuid.Nil || doc.Version != 1 ||
-					doc.Title != strings.TrimSpace(tc.title) || doc.ContentBytes != int64(len(tc.content)) {
+					doc.Scope != domain.KnowledgeScopeProject || doc.RepositoryID != nil || doc.Title != strings.TrimSpace(tc.title) || doc.ContentBytes != int64(len(tc.content)) {
 					t.Fatalf("create = %+v, %v", doc, err)
 				}
 			} else if !errors.Is(err, domain.ErrInvalidInput) {
@@ -128,32 +129,35 @@ func TestDocumentServiceScopingAndVersions(t *testing.T) {
 		msg  string
 	}{
 		{"invalid project UUID", func() error { _, err := s.ListByProject(ctx, "invalid", domain.ListDocumentsFilter{}); return err }, domain.ErrInvalidInput, ""},
-		{"invalid document UUID", func() error { _, err := s.GetByID(ctx, p, "invalid"); return err }, domain.ErrInvalidInput, ""},
+		{"invalid document UUID", func() error { _, err := s.GetByID(ctx, p, "invalid", nil); return err }, domain.ErrInvalidInput, ""},
 		{"missing project create", func() error { _, err := s.Create(ctx, missing, domain.CreateDocumentInput{}); return err }, domain.ErrNotFound, "project not found"},
 		{"missing project list", func() error { _, err := s.ListByProject(ctx, missing, domain.ListDocumentsFilter{}); return err }, domain.ErrNotFound, "project not found"},
-		{"cross-project read", func() error { _, err := s.GetByID(ctx, other.String(), id); return err }, domain.ErrNotFound, "document not found"},
+		{"cross-project read", func() error { _, err := s.GetByID(ctx, other.String(), id, nil); return err }, domain.ErrNotFound, "document not found"},
 		{"cross-project update", func() error {
-			_, err := s.Update(ctx, other.String(), id, domain.UpdateDocumentInput{Title: title, Version: 1})
+			_, err := s.Update(ctx, other.String(), id, nil, domain.UpdateDocumentInput{Title: title, Version: 1})
 			return err
 		}, domain.ErrNotFound, "document not found"},
-		{"cross-project delete", func() error { return s.Delete(ctx, other.String(), id, nil) }, domain.ErrNotFound, "document not found"},
-		{"invalid update version", func() error { _, err := s.Update(ctx, p, id, domain.UpdateDocumentInput{Title: title}); return err }, domain.ErrInvalidInput, ""},
-		{"invalid patch version", func() error { _, err := s.Patch(ctx, p, id, domain.PatchDocumentInput{Title: &title}); return err }, domain.ErrInvalidInput, ""},
-		{"invalid delete version", func() error { return s.Delete(ctx, p, id, &zero) }, domain.ErrInvalidInput, ""},
-		{"empty patch", func() error { _, err := s.Patch(ctx, p, id, domain.PatchDocumentInput{Version: 1}); return err }, domain.ErrInvalidInput, ""},
+		{"cross-project delete", func() error { return s.Delete(ctx, other.String(), id, nil, nil) }, domain.ErrNotFound, "document not found"},
+		{"invalid update version", func() error {
+			_, err := s.Update(ctx, p, id, nil, domain.UpdateDocumentInput{Title: title})
+			return err
+		}, domain.ErrInvalidInput, ""},
+		{"invalid patch version", func() error { _, err := s.Patch(ctx, p, id, nil, domain.PatchDocumentInput{Title: &title}); return err }, domain.ErrInvalidInput, ""},
+		{"invalid delete version", func() error { return s.Delete(ctx, p, id, nil, &zero) }, domain.ErrInvalidInput, ""},
+		{"empty patch", func() error { _, err := s.Patch(ctx, p, id, nil, domain.PatchDocumentInput{Version: 1}); return err }, domain.ErrInvalidInput, ""},
 		{"invalid patch content", func() error {
-			_, err := s.Patch(ctx, p, id, domain.PatchDocumentInput{Content: &badContent, Version: 1})
+			_, err := s.Patch(ctx, p, id, nil, domain.PatchDocumentInput{Content: &badContent, Version: 1})
 			return err
 		}, domain.ErrInvalidInput, ""},
 		{"stale update", func() error {
-			_, err := s.Update(ctx, p, id, domain.UpdateDocumentInput{Title: title, Version: stale})
+			_, err := s.Update(ctx, p, id, nil, domain.UpdateDocumentInput{Title: title, Version: stale})
 			return err
 		}, domain.ErrVersionConflict, ""},
 		{"stale patch", func() error {
-			_, err := s.Patch(ctx, p, id, domain.PatchDocumentInput{Title: &title, Version: stale})
+			_, err := s.Patch(ctx, p, id, nil, domain.PatchDocumentInput{Title: &title, Version: stale})
 			return err
 		}, domain.ErrVersionConflict, ""},
-		{"stale delete", func() error { return s.Delete(ctx, p, id, &stale) }, domain.ErrVersionConflict, ""},
+		{"stale delete", func() error { return s.Delete(ctx, p, id, nil, &stale) }, domain.ErrVersionConflict, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := tc.run(); !errors.Is(err, tc.want) || (tc.msg != "" && err.Error() != tc.msg) {
@@ -161,7 +165,7 @@ func TestDocumentServiceScopingAndVersions(t *testing.T) {
 			}
 		})
 	}
-	got, err := s.Patch(ctx, p, id, domain.PatchDocumentInput{Title: &title, Version: 1})
+	got, err := s.Patch(ctx, p, id, nil, domain.PatchDocumentInput{Title: &title, Version: 1})
 	if err != nil || got.Title != "Revised" || got.Content != doc.Content || got.Version != 2 {
 		t.Fatalf("patch = %+v, %v", got, err)
 	}
@@ -187,6 +191,36 @@ func TestDocumentServicePagination(t *testing.T) {
 			}
 		} else if err != nil || result.Limit != tc.limit || result.Offset != tc.filter.Offset {
 			t.Errorf("filter %+v: got %+v, %v", tc.filter, result, err)
+		}
+	}
+}
+
+func TestDocumentServiceRepositoryScope(t *testing.T) {
+	project, repo, otherRepo := uuid.New(), uuid.New(), uuid.New()
+	s := NewDocumentService(documentProjects{project: true}, &testDocumentStore{}, 0)
+	ctx, projectID := t.Context(), project.String()
+	doc, err := s.Create(ctx, projectID, domain.CreateDocumentInput{Title: "Repo note", RepositoryID: &repo})
+	if err != nil || doc.Scope != domain.KnowledgeScopeRepository || doc.RepositoryID == nil || *doc.RepositoryID != repo {
+		t.Fatalf("created repository document = %+v, %v", doc, err)
+	}
+	docID := doc.ID.String()
+	if _, err := s.GetByID(ctx, projectID, docID, &otherRepo); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("cross-repository read = %v", err)
+	}
+	if _, err := s.Update(ctx, projectID, docID, &otherRepo, domain.UpdateDocumentInput{Title: "Unexpected", Version: 1}); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("cross-repository update = %v", err)
+	}
+	if err := s.Delete(ctx, projectID, docID, &otherRepo, nil); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("cross-repository delete = %v", err)
+	}
+	if got, err := s.GetByID(ctx, projectID, docID, &repo); err != nil || got.Title != doc.Title {
+		t.Fatalf("scoped read = %+v, %v", got, err)
+	}
+	for _, filter := range []domain.ListDocumentsFilter{
+		{Scope: "invalid"}, {Scope: domain.KnowledgeScopeProject, RepositoryID: &repo},
+	} {
+		if _, err := s.ListByProject(ctx, projectID, filter); !errors.Is(err, domain.ErrInvalidInput) {
+			t.Errorf("list %+v = %v", filter, err)
 		}
 	}
 }

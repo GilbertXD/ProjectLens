@@ -83,6 +83,9 @@ func (s *repositoryServiceStore) Patch(ctx context.Context, project, id uuid.UUI
 	if input.Description != nil {
 		repo.Description = *input.Description
 	}
+	if input.Role != nil {
+		repo.Role = *input.Role
+	}
 	return s.Create(ctx, repo)
 }
 
@@ -115,15 +118,17 @@ func TestRepositoryServiceAssociations(t *testing.T) {
 	ctx := t.Context()
 	id := project.String()
 	localRepo, err := svc.Associate(ctx, id, domain.AssociateRepositoryInput{SourceType: domain.RepositorySourceLocalGit, Source: "/root/repo"})
-	if err != nil || localRepo.LocalPath == nil || *localRepo.LocalPath != "/root/repo" || localRepo.DefaultBranch != "main" || localRepo.ProjectID != project || localRepo.LastSyncedAt == nil {
+	if err != nil || localRepo.LocalPath == nil || *localRepo.LocalPath != "/root/repo" || localRepo.DefaultBranch != "main" || localRepo.ProjectID != project || localRepo.LastSyncedAt == nil || localRepo.Role != domain.RepositoryRolePrimary {
 		t.Fatalf("local association: %+v %v", localRepo, err)
 	}
 	name := " custom "
-	ghRepo, err := svc.Associate(ctx, id, domain.AssociateRepositoryInput{SourceType: domain.RepositorySourceGitHub, Source: "  https://WWW.GITHUB.COM/owner/old.git/  ", Name: &name})
-	if err != nil || ghRepo.Name != "custom" || ghRepo.Description != "upstream" || ghRepo.GitHubRepoID == nil ||
+	role := domain.RepositoryRoleReference
+	ghRepo, err := svc.Associate(ctx, id, domain.AssociateRepositoryInput{SourceType: domain.RepositorySourceGitHub, Source: "  https://WWW.GITHUB.COM/owner/old.git/  ", Name: &name, Role: &role})
+	if err != nil || ghRepo.Role != role || ghRepo.Name != "custom" || ghRepo.Description != "upstream" || ghRepo.GitHubRepoID == nil ||
 		*ghRepo.GitHubRepoID != 22 || ghRepo.CanonicalSource != "github:owner/new" || ghRepo.Source != "https://github.com/owner/old" {
 		t.Fatalf("GitHub association: %+v %v", ghRepo, err)
 	}
+	emptyRole, invalidRole := domain.RepositoryRole(""), domain.RepositoryRole("invalid")
 	blank, nul, long := " ", "bad\x00", strings.Repeat("界", 2001)
 	for _, tc := range []struct {
 		id    string
@@ -136,6 +141,8 @@ func TestRepositoryServiceAssociations(t *testing.T) {
 		{"bad", domain.AssociateRepositoryInput{}, domain.ErrInvalidInput},
 		{uuid.NewString(), domain.AssociateRepositoryInput{}, domain.ErrNotFound},
 		{id, domain.AssociateRepositoryInput{SourceType: "other"}, domain.ErrInvalidInput},
+		{id, domain.AssociateRepositoryInput{SourceType: domain.RepositorySourceLocalGit, Source: "/root/repo", Role: &emptyRole}, domain.ErrInvalidInput},
+		{id, domain.AssociateRepositoryInput{SourceType: domain.RepositorySourceLocalGit, Source: "/root/repo", Role: &invalidRole}, domain.ErrInvalidInput},
 		{id, domain.AssociateRepositoryInput{SourceType: domain.RepositorySourceLocalGit, Source: "/outside"}, domain.ErrForbidden},
 		{id, domain.AssociateRepositoryInput{SourceType: domain.RepositorySourceGitHub, Source: "http://github.com/owner/old"}, domain.ErrInvalidInput},
 		{id, domain.AssociateRepositoryInput{Name: &blank}, domain.ErrInvalidInput},
@@ -178,8 +185,16 @@ func TestRepositoryServiceManagement(t *testing.T) {
 	if got, err := svc.Patch(ctx, project.String(), id.String(), domain.PatchRepositoryInput{Name: &name, Description: &description}); err != nil || got.Name != "renamed" {
 		t.Fatalf("patch: %+v %v", got, err)
 	}
+	role := domain.RepositoryRoleReference
+	if got, err := svc.Patch(ctx, project.String(), id.String(), domain.PatchRepositoryInput{Role: &role}); err != nil || got.Role != role || got.Name != "renamed" {
+		t.Fatalf("role-only patch: %+v %v", got, err)
+	}
+	emptyRole := domain.RepositoryRole("")
+	if _, err := svc.Patch(ctx, project.String(), id.String(), domain.PatchRepositoryInput{Role: &emptyRole}); !errors.Is(err, domain.ErrInvalidInput) {
+		t.Fatalf("empty role patch: %v", err)
+	}
 	got, err := svc.Sync(ctx, project.String(), id.String())
-	if err != nil || got.LastSyncedAt == nil || got.Name != "renamed" || got.Description != description || got.DefaultBranch != "updated" {
+	if err != nil || got.LastSyncedAt == nil || got.Name != "renamed" || got.Description != description || got.DefaultBranch != "updated" || got.Role != role {
 		t.Fatalf("sync: %+v %v", got, err)
 	}
 	store.createErr = domain.ErrConflict
@@ -199,7 +214,7 @@ func TestRepositoryServiceManagement(t *testing.T) {
 	if list, err := svc.ListByProject(ctx, project.String(), domain.ListRepositoriesFilter{}); err != nil || list.Limit != 20 {
 		t.Fatalf("default list: %+v %v", list, err)
 	}
-	for _, filter := range []domain.ListRepositoriesFilter{{Limit: -1}, {Limit: 101}, {Offset: -1}, {SourceType: "other"}} {
+	for _, filter := range []domain.ListRepositoriesFilter{{Limit: -1}, {Limit: 101}, {Offset: -1}, {SourceType: "other"}, {Role: "other"}} {
 		if _, err := svc.ListByProject(ctx, project.String(), filter); !errors.Is(err, domain.ErrInvalidInput) {
 			t.Errorf("filter %+v: %v", filter, err)
 		}

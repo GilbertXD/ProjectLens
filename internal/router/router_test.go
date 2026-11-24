@@ -135,11 +135,14 @@ func TestDocumentRoutes(t *testing.T) {
 		Projects:  handler.NewProjectHandler(nil, log),
 		Documents: handler.NewDocumentHandler(nil, log, 0),
 	})
-	base := "/api/v1/projects/:id/documents"
-	scoped := base + "/:docId"
-	want := map[string]bool{
-		"POST " + base: true, "GET " + base: true, "GET " + scoped: true,
-		"PUT " + scoped: true, "PATCH " + scoped: true, "DELETE " + scoped: true,
+	want := map[string]bool{}
+	for _, base := range []string{"/api/v1/projects/:id/documents", "/api/v1/projects/:id/repositories/:repoId/documents"} {
+		for _, method := range []string{"POST", "GET"} {
+			want[method+" "+base] = true
+		}
+		for _, method := range []string{"GET", "PUT", "PATCH", "DELETE"} {
+			want[method+" "+base+"/:docId"] = true
+		}
 	}
 	for _, route := range engine.Routes() {
 		delete(want, route.Method+" "+route.Path)
@@ -154,10 +157,16 @@ func TestSearchRoute(t *testing.T) {
 	engine := New(config.Config{App: config.AppConfig{Env: "test"}}, log, Dependencies{
 		Projects: handler.NewProjectHandler(nil, log), Search: handler.NewSearchHandler(nil, log),
 	})
+	want := map[string]bool{
+		"/api/v1/projects/:id/search":                      true,
+		"/api/v1/projects/:id/repositories/:repoId/search": true,
+	}
 	for _, route := range engine.Routes() {
-		if route.Method == http.MethodGet && route.Path == "/api/v1/projects/:id/search" {
-			return
+		if route.Method == http.MethodGet {
+			delete(want, route.Path)
 		}
 	}
-	t.Fatal("project search route missing")
+	if len(want) != 0 {
+		t.Fatalf("missing search routes: %v", want)
+	}
 }

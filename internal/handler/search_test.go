@@ -60,6 +60,8 @@ func TestSearchHandlerErrors(t *testing.T) {
 	for _, query := range []string{
 		"limit=1&limit=2", "offset=0&offset=1", "limit=0", "limit=", "limit=-1", "limit=1.5",
 		"offset=-1", "offset=", "offset=1000000000000000000000", "repository_id=invalid",
+		"scope=", "scope=unknown", "repository_ids=invalid", "repository_role=", "repository_role=other",
+		"include_project_documents=maybe", "include_project_documents=true&include_project_documents=false",
 		"q=a&q=b", "q=%ZZ", "path_prefix=a&path_prefix=b",
 	} {
 		t.Run(query, func(t *testing.T) {
@@ -92,5 +94,37 @@ func assertSearchHTTPError(t *testing.T, w *httptest.ResponseRecorder, status in
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || w.Code != status || body["code"] != code ||
 		body["error"] == "private SQL details" || w.Header().Get("X-Search-Cache") != "" || w.Header().Get("X-Search-Version") != "" {
 		t.Fatalf("response = %d %v %s, want %d %s", w.Code, w.Header(), w.Body, status, code)
+	}
+}
+
+func TestSearchHandlerRepositoryAndCrossRepositoryFilters(t *testing.T) {
+	repo, other := uuid.New(), uuid.New()
+	base := "/api/v1/projects/id"
+	scoped := base + "/repositories/" + repo.String() + "/search?q=notes"
+	for _, tc := range []struct {
+		path string
+		want domain.SearchFilter
+	}{
+		{scoped, domain.SearchFilter{Query: "notes", Scope: domain.SearchScopeRepository, RepositoryID: &repo}},
+		{scoped + "&scope=repository&repository_id=" + repo.String(), domain.SearchFilter{Query: "notes", Scope: domain.SearchScopeRepository, RepositoryID: &repo}},
+		{base + "/search?q=notes&scope=cross_repository&repository_role=reference&include_project_documents=true&repository_ids=" + repo.String() + "," + other.String() + "&repository_ids=" + repo.String(),
+			domain.SearchFilter{Query: "notes", Scope: domain.SearchScopeCrossRepository, RepositoryIDs: []uuid.UUID{repo, other, repo}, RepositoryRole: domain.RepositoryRoleReference, IncludeProjectDocuments: true}},
+	} {
+		engine := searchTestRouter(testSearchService(func(_ context.Context, project string, filter domain.SearchFilter) (domain.SearchResult, error) {
+			if project != "id" || !reflect.DeepEqual(filter, tc.want) {
+				t.Fatalf("%s: got project %s and filter %+v, want %+v", tc.path, project, filter, tc.want)
+			}
+			return domain.SearchResult{}, nil
+		}))
+		w := httptest.NewRecorder()
+		engine.ServeHTTP(w, httptest.NewRequest(http.MethodGet, tc.path, nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s returned %d %s", tc.path, w.Code, w.Body)
+		}
+	}
+	for _, query := range []string{"scope=all", "scope=project", "repository_id=" + other.String(), "repository_ids=" + repo.String(), "repository_role=primary"} {
+		w := httptest.NewRecorder()
+		searchTestRouter(nil).ServeHTTP(w, httptest.NewRequest(http.MethodGet, scoped+"&"+query, nil))
+		assertSearchHTTPError(t, w, 400, "invalid_input")
 	}
 }
