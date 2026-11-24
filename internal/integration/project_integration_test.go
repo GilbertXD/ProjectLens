@@ -157,6 +157,23 @@ func TestProjectLifecycle(t *testing.T) {
 			t.Fatalf("isolation rollback left schema changes: removed=%t, err=%v", removed, err)
 		}
 	}
+	rollbackPreservation := func() {
+		t.Helper()
+		if err := db.MigrateDown(ctx, pool); err != nil {
+			t.Fatalf("migrate document preservation down: %v", err)
+		}
+		var reverted bool
+		if err := pool.QueryRow(ctx, `SELECT
+			NOT EXISTS (SELECT FROM information_schema.columns WHERE table_schema = current_schema()
+				AND table_name = 'documents' AND column_name = 'metadata') AND
+			EXISTS (SELECT FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
+				JOIN pg_namespace n ON n.oid = t.relnamespace
+				WHERE n.nspname = current_schema() AND t.relname = 'documents'
+					AND c.conname = 'documents_repository_scope_fkey' AND c.contype = 'f' AND c.confdeltype = 'c')`).Scan(&reverted); err != nil || !reverted {
+			t.Fatalf("preservation rollback left schema changes: reverted=%t, err=%v", reverted, err)
+		}
+	}
+	rollbackPreservation()
 	rollbackIsolation()
 	for _, object := range []string{"trace_parent", "sync_policies", "github_activity", "repository_commits", "jobs_active_sync_target"} {
 		if err := db.MigrateDown(ctx, pool); err != nil {
@@ -230,6 +247,7 @@ func TestProjectLifecycle(t *testing.T) {
 	if version, err := searchStore.GetProjectSearchVersion(ctx, legacyID); err != nil || version != beforeAssignment+1 {
 		t.Fatalf("document ownership update: version=%d, previously=%d, err=%v", version, beforeAssignment, err)
 	}
+	rollbackPreservation()
 	rollbackIsolation()
 	// The restored functions must work after the columns they used at v12 have been removed.
 	var versionBefore, versionAfter int64

@@ -108,15 +108,47 @@ func (r *PostgresRepositoryStore) UpdateMetadata(ctx context.Context, repo domai
 		repo.GitHubRepoID, repo.GitHubVisibility, repo.GitHubStars, repo.GitHubLanguage, repo.LastSyncedAt))
 }
 
+// disassociationDeletes removes a repository's derived rows before the
+// repository row itself. Deleting children first keeps the search-version
+// triggers able to resolve the repository, and leaves the foreign keys as a
+// safety net instead of the only guard.
+var disassociationDeletes = []string{
+	"DELETE FROM source_files WHERE repository_id = $1",
+	"DELETE FROM snapshots WHERE repository_id = $1",
+	"DELETE FROM repository_commits WHERE repository_id = $1",
+	"DELETE FROM repository_history_refs WHERE repository_id = $1",
+	"DELETE FROM github_activity WHERE repository_id = $1",
+	"DELETE FROM github_activity_state WHERE repository_id = $1",
+	"DELETE FROM sync_policies WHERE repository_id = $1",
+}
+
 func (r *PostgresRepositoryStore) Delete(ctx context.Context, projectID, repoID uuid.UUID) error {
 	err := db.NewPgxTxManager(r.pool).WithinTx(ctx, func(ctx context.Context) error {
 		conn := db.ConnFromContext(ctx, r.pool)
-		tag, err := conn.Exec(ctx, "DELETE FROM repositories WHERE project_id = $1 AND id = $2", projectID, repoID)
+		var name string
+		err := conn.QueryRow(ctx, "SELECT name FROM repositories WHERE project_id = $1 AND id = $2", projectID, repoID).Scan(&name)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.ErrNotFound
+		}
 		if err != nil {
 			return err
 		}
-		if tag.RowsAffected() == 0 {
-			return domain.ErrNotFound
+		// Documents are user-authored notes, so they survive disassociation as
+		// project-level documents that keep the repository as provenance. The
+		// scope itself is cleared by the repository foreign key.
+		if _, err := conn.Exec(ctx, `
+			UPDATE documents SET metadata = jsonb_set(metadata, '{origin}',
+				jsonb_build_object('repository_id', $2::text, 'repository_name', $3))
+			WHERE project_id = $1 AND repository_id = $2`, projectID, repoID, name); err != nil {
+			return err
+		}
+		for _, statement := range disassociationDeletes {
+			if _, err := conn.Exec(ctx, statement, repoID); err != nil {
+				return err
+			}
+		}
+		if _, err := conn.Exec(ctx, "DELETE FROM repositories WHERE project_id = $1 AND id = $2", projectID, repoID); err != nil {
+			return err
 		}
 		_, err = conn.Exec(ctx, `
 			UPDATE jobs SET

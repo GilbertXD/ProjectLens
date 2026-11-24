@@ -69,7 +69,7 @@ Database tests use a dedicated schema per test and need a PostgreSQL account tha
 
 The server requires PostgreSQL. For a Go process on the host, provision a database matching `DATABASE_URL` in `.env.example` or export a DSN for an existing database. Compose starts PostgreSQL and stores application data in the named `postgres_data` volume.
 
-The server applies embedded migrations on startup by default. Set `DB_AUTO_MIGRATE=false` if you apply migrations separately using `make migrate-up`. Use `make migrate-status` to inspect migration state. `make migrate-down` rolls back one migration at a time. Migration 12 adds repository roles and document ownership. Rolling it back preserves repository and document rows and removes those two fields.
+The server applies embedded migrations on startup by default. Set `DB_AUTO_MIGRATE=false` if you apply migrations separately using `make migrate-up`. Use `make migrate-status` to inspect migration state. `make migrate-down` rolls back one migration at a time. Migration 12 adds repository roles and document ownership. Rolling it back preserves repository and document rows and removes those two fields. Migration 13 adds `documents.metadata` and changes document ownership to survive disassociation. Rolling it back restores the previous behaviour, which deletes repository-owned documents along with the repository.
 
 | Method | Path | Result |
 | --- | --- | --- |
@@ -119,6 +119,8 @@ With `TEST_DATABASE_URL` set, the search integration tests use an in-process Red
 
 Markdown documents are owned by the project or by one of its repositories. At `/api/v1/projects/{projectId}/documents`, omit `repository_id` on create for a project-level document, or supply it for a repository-owned document. The response reports `scope` as `project` or `repository`.
 
+Documents are user-authored notes, so disassociating a repository never deletes them. A repository-owned document becomes a project-level document and reports `scope` as `project` with an `origin` object holding `repository_id` and `repository_name`. Provenance is informational only: it never grants repository scope. PUT replaces it (omitting `origin` clears it) and PATCH sets it, clears it with `null`, or leaves it unchanged when omitted.
+
 The project list includes both scopes by default. Filter with `scope=project`, `scope=repository`, or `repository_id=<uuid>`. A repository ID is incompatible with `scope=project`. Use `/api/v1/projects/{projectId}/repositories/{repoId}/documents` as the base path to create, list, read, update, and delete documents owned by one repository. The repository is taken from the path on create. Requests for repositories or documents outside the specified scope return `404`.
 
 | Method | Path relative to base | Behavior |
@@ -126,8 +128,8 @@ The project list includes both scopes by default. Filter with `scope=project`, `
 | POST | (base) | Create with `title` and optional `content`. Returns `201`. |
 | GET | (base) | List summaries without full content. Returns `200`. |
 | GET | `/{docId}` | Read the full document. Returns `200`. |
-| PUT | `/{docId}` | Replace the title and content. Omitted content becomes empty. Returns `200`. |
-| PATCH | `/{docId}` | Change `title`, `content`, or both. Returns `200`. |
+| PUT | `/{docId}` | Replace the title, content, and `origin`. Omitted content becomes empty and omitted `origin` is cleared. Returns `200`. |
+| PATCH | `/{docId}` | Change `title`, `content`, and `origin`, or any combination. Send `"origin": null` to clear provenance. Returns `200`. |
 | DELETE | `/{docId}` | Delete the document. Accepts an optional `If-Match`. Returns `204`. |
 
 Lists are ordered by most recently updated, then by descending document ID. Use `limit` (default 20, maximum 100) and `offset` (default 0). The response includes `items`, `total`, `limit`, and `offset`. Requests for documents outside the specified project return `404`.
@@ -157,7 +159,7 @@ A project can associate local Git working trees and public GitHub repositories. 
 | POST | `/repositories/:repoId/refresh-metadata` | Refresh source metadata and set `last_synced_at`, preserving the name and description |
 | DELETE | `/repositories/:repoId` | Remove the association and return 204 |
 
-Disassociation deletes that repository’s snapshots, files, history, GitHub activity, sync policies, and documents. Pending jobs for the repository are cancelled and running jobs receive a cancellation request. The project’s search cache is invalidated. Project-level documents and data owned by other repositories are preserved.
+Disassociation deletes that repository’s snapshots, files, history, GitHub activity, and sync policies. Pending jobs for the repository are cancelled and running jobs receive a cancellation request. The project’s search cache is invalidated. Documents survive as project-level documents that keep the repository under `origin`, and data owned by other repositories is preserved.
 
 POST takes a `source_type` of `local_git` or `github`, a `source`, and optional `name`, `description`, and `role`. For GitHub, use a public repository URL such as `https://github.com/owner/repo`. For local Git, use an absolute path to the root of a readable working tree. The server needs Git installed and access to the path. In Docker Compose, bind-mount the repositories and set the allowed roots to their paths inside the container. Local associations are forbidden by default.
 

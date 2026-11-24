@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -21,13 +22,29 @@ func NewPostgresDocumentStore(pool *pgxpool.Pool) *PostgresDocumentStore {
 	return &PostgresDocumentStore{pool: pool}
 }
 
-const documentColumns = "id, project_id, title, content, content_bytes, version, created_at, updated_at, repository_id"
+const documentColumns = "id, project_id, title, content, content_bytes, version, created_at, updated_at, repository_id, metadata"
 
 func scanDocument(row pgx.Row) (domain.Document, error) {
 	var doc domain.Document
-	err := row.Scan(&doc.ID, &doc.ProjectID, &doc.Title, &doc.Content, &doc.ContentBytes, &doc.Version, &doc.CreatedAt, &doc.UpdatedAt, &doc.RepositoryID)
+	var metadata []byte
+	err := row.Scan(&doc.ID, &doc.ProjectID, &doc.Title, &doc.Content, &doc.ContentBytes, &doc.Version, &doc.CreatedAt, &doc.UpdatedAt, &doc.RepositoryID, &metadata)
 	doc.Scope = domain.DocumentScope(doc.RepositoryID)
+	doc.Origin = documentOrigin(metadata)
 	return doc, err
+}
+
+// documentOrigin decodes the informational provenance kept in documents.metadata.
+func documentOrigin(metadata []byte) *domain.DocumentOrigin {
+	if len(metadata) == 0 {
+		return nil
+	}
+	var stored struct {
+		Origin *domain.DocumentOrigin `json:"origin"`
+	}
+	if err := json.Unmarshal(metadata, &stored); err != nil {
+		return nil
+	}
+	return stored.Origin
 }
 
 func (r *PostgresDocumentStore) Create(ctx context.Context, doc domain.Document) (domain.Document, error) {
@@ -55,7 +72,7 @@ func (r *PostgresDocumentStore) ListByProject(ctx context.Context, projectID uui
 	result := domain.DocumentListResult{Items: []domain.DocumentSummary{}, Limit: filter.Limit, Offset: filter.Offset}
 	rows, err := db.ConnFromContext(ctx, r.pool).Query(ctx, `
 		WITH matching AS NOT MATERIALIZED (
-			SELECT id, title, content_bytes, version, created_at, updated_at, repository_id
+			SELECT id, title, content_bytes, version, created_at, updated_at, repository_id, metadata
 			FROM documents WHERE project_id = $1
 				AND ($4::uuid IS NULL OR repository_id = $4)
 				AND ($5::text <> 'project' OR repository_id IS NULL)
@@ -63,7 +80,7 @@ func (r *PostgresDocumentStore) ListByProject(ctx context.Context, projectID uui
 		), totals AS (SELECT count(*) AS total FROM matching),
 		page AS (SELECT * FROM matching ORDER BY updated_at DESC, id DESC LIMIT $2 OFFSET $3)
 		SELECT page.id, page.title, page.content_bytes, page.version, page.created_at, page.updated_at,
-			page.repository_id, totals.total
+			page.repository_id, page.metadata, totals.total
 		FROM totals LEFT JOIN page ON true
 		WHERE $4::uuid IS NULL OR EXISTS (SELECT 1 FROM repositories WHERE project_id = $1 AND id = $4)
 		ORDER BY page.updated_at DESC, page.id DESC`,
@@ -79,13 +96,14 @@ func (r *PostgresDocumentStore) ListByProject(ctx context.Context, projectID uui
 		var title *string
 		var contentBytes, version *int64
 		var createdAt, updatedAt *time.Time
-		if err := rows.Scan(&id, &title, &contentBytes, &version, &createdAt, &updatedAt, &repositoryID, &result.Total); err != nil {
+		var metadata []byte
+		if err := rows.Scan(&id, &title, &contentBytes, &version, &createdAt, &updatedAt, &repositoryID, &metadata, &result.Total); err != nil {
 			return result, err
 		}
 		if id != nil {
 			result.Items = append(result.Items, domain.DocumentSummary{
 				ID: *id, ProjectID: projectID, RepositoryID: repositoryID, Scope: domain.DocumentScope(repositoryID), Title: *title, ContentBytes: *contentBytes,
-				Version: *version, CreatedAt: *createdAt, UpdatedAt: *updatedAt,
+				Version: *version, CreatedAt: *createdAt, UpdatedAt: *updatedAt, Origin: documentOrigin(metadata),
 			})
 		}
 	}
@@ -98,17 +116,30 @@ func (r *PostgresDocumentStore) ListByProject(ctx context.Context, projectID uui
 	return result, nil
 }
 
-func (r *PostgresDocumentStore) Update(ctx context.Context, projectID, docID uuid.UUID, repositoryID *uuid.UUID, expectedVersion int64, title, content string) (domain.Document, error) {
-	return r.Patch(ctx, projectID, docID, repositoryID, expectedVersion, &title, &content)
+func (r *PostgresDocumentStore) Update(ctx context.Context, projectID, docID uuid.UUID, repositoryID *uuid.UUID, expectedVersion int64, title, content string, origin domain.OriginPatch) (domain.Document, error) {
+	return r.Patch(ctx, projectID, docID, repositoryID, expectedVersion, &title, &content, origin)
 }
 
-func (r *PostgresDocumentStore) Patch(ctx context.Context, projectID, docID uuid.UUID, repositoryID *uuid.UUID, expectedVersion int64, title, content *string) (domain.Document, error) {
+func (r *PostgresDocumentStore) Patch(ctx context.Context, projectID, docID uuid.UUID, repositoryID *uuid.UUID, expectedVersion int64, title, content *string, origin domain.OriginPatch) (domain.Document, error) {
 	conn := db.ConnFromContext(ctx, r.pool)
+	var originJSON *string
+	if origin.Origin != nil {
+		encoded, err := json.Marshal(origin.Origin)
+		if err != nil {
+			return domain.Document{}, err
+		}
+		value := string(encoded)
+		originJSON = &value
+	}
 	doc, err := scanDocument(conn.QueryRow(ctx, `
 		UPDATE documents SET title = COALESCE($4, title), content = COALESCE($5, content),
+			metadata = CASE
+				WHEN $7::jsonb IS NOT NULL THEN jsonb_set(metadata, '{origin}', $7::jsonb)
+				WHEN $8::boolean THEN metadata - 'origin'
+				ELSE metadata END,
 			version = version + 1, updated_at = NOW()
 		WHERE project_id = $1 AND id = $2 AND version = $3 AND ($6::uuid IS NULL OR repository_id = $6) RETURNING `+documentColumns,
-		projectID, docID, expectedVersion, title, content, repositoryID))
+		projectID, docID, expectedVersion, title, content, repositoryID, originJSON, origin.Clear))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return doc, documentVersionMiss(ctx, conn, projectID, docID, repositoryID, expectedVersion)
 	}

@@ -151,6 +151,18 @@ func TestDocumentLifecycle(t *testing.T) {
 	if got.Title != "Full" || got.Content != "" || got.ContentBytes != 0 {
 		t.Fatalf("PATCH result = %+v", got)
 	}
+	origin := fmt.Sprintf(`{"origin":{"repository_id":%q,"repository_name":" Former Repo "}}`, uuid.New())
+	got = readDocument(t, expectDocumentResponse(t, srv, "PATCH", item, origin, `"3"`, 200), 4)
+	if got.Scope != domain.KnowledgeScopeProject || got.RepositoryID != nil || got.Origin == nil ||
+		got.Origin.RepositoryName != "Former Repo" || got.Title != "Full" {
+		t.Fatalf("PATCH origin result = %+v", got)
+	}
+	got = readDocument(t, expectDocumentResponse(t, srv, "PATCH", item, `{"origin":null}`, `"4"`, 200), 5)
+	if got.Origin != nil || got.Scope != domain.KnowledgeScopeProject {
+		t.Fatalf("PATCH clear origin result = %+v", got)
+	}
+	invalidOrigin := fmt.Sprintf(`{"origin":{"repository_id":%q,"repository_name":" "}}`, uuid.New())
+	expectDocumentCode(t, expectDocumentResponse(t, srv, "PATCH", item, invalidOrigin, `"5"`, 400), "invalid_input", "")
 	expectDocumentResponse(t, srv, "DELETE", item, "", "", 204)
 	expectDocumentCode(t, expectDocumentResponse(t, srv, "GET", item, "", "", 404), "not_found", "document not found")
 }

@@ -17,8 +17,8 @@ type DocumentStore interface {
 	Create(context.Context, domain.Document) (domain.Document, error)
 	GetScopedByID(context.Context, uuid.UUID, uuid.UUID, *uuid.UUID) (domain.Document, error)
 	ListByProject(context.Context, uuid.UUID, domain.ListDocumentsFilter) (domain.DocumentListResult, error)
-	Update(context.Context, uuid.UUID, uuid.UUID, *uuid.UUID, int64, string, string) (domain.Document, error)
-	Patch(context.Context, uuid.UUID, uuid.UUID, *uuid.UUID, int64, *string, *string) (domain.Document, error)
+	Update(context.Context, uuid.UUID, uuid.UUID, *uuid.UUID, int64, string, string, domain.OriginPatch) (domain.Document, error)
+	Patch(context.Context, uuid.UUID, uuid.UUID, *uuid.UUID, int64, *string, *string, domain.OriginPatch) (domain.Document, error)
 	Delete(context.Context, uuid.UUID, uuid.UUID, *uuid.UUID, *int64) error
 }
 
@@ -94,6 +94,20 @@ func validateDocumentVersion(version int64) error {
 	return nil
 }
 
+// validateDocumentOrigin trims and checks informational provenance. Provenance
+// never grants scope, so it may name a repository that is no longer associated.
+func validateDocumentOrigin(origin *domain.DocumentOrigin) (*domain.DocumentOrigin, error) {
+	if origin == nil {
+		return nil, nil
+	}
+	name := strings.TrimSpace(origin.RepositoryName)
+	if origin.RepositoryID == uuid.Nil || name == "" || utf8.RuneCountInString(name) > 200 ||
+		!utf8.ValidString(name) || strings.ContainsRune(name, 0) {
+		return nil, fmt.Errorf("%w: origin must contain a repository_id and 1 to 200 characters of valid UTF-8 repository_name", domain.ErrInvalidInput)
+	}
+	return &domain.DocumentOrigin{RepositoryID: origin.RepositoryID, RepositoryName: name}, nil
+}
+
 func (s *DocumentService) Create(ctx context.Context, rawProjectID string, input domain.CreateDocumentInput) (domain.Document, error) {
 	projectID, err := s.projectID(ctx, rawProjectID)
 	if err != nil {
@@ -153,7 +167,12 @@ func (s *DocumentService) Update(ctx context.Context, rawProjectID, rawDocID str
 	if err != nil {
 		return domain.Document{}, err
 	}
-	doc, err := s.store.Update(ctx, projectID, docID, repositoryID, input.Version, *title, input.Content)
+	origin, err := validateDocumentOrigin(input.Origin)
+	if err != nil {
+		return domain.Document{}, err
+	}
+	doc, err := s.store.Update(ctx, projectID, docID, repositoryID, input.Version, *title, input.Content,
+		domain.OriginPatch{Origin: origin, Clear: input.Origin == nil})
 	return doc, documentError(err)
 }
 
@@ -165,14 +184,19 @@ func (s *DocumentService) Patch(ctx context.Context, rawProjectID, rawDocID stri
 	if err := validateDocumentVersion(input.Version); err != nil {
 		return domain.Document{}, err
 	}
-	if input.Title == nil && input.Content == nil {
-		return domain.Document{}, fmt.Errorf("%w: patch must contain title or content", domain.ErrInvalidInput)
+	if input.Title == nil && input.Content == nil && input.Origin == nil && !input.ClearOrigin {
+		return domain.Document{}, fmt.Errorf("%w: patch must contain title, content, or origin", domain.ErrInvalidInput)
 	}
 	title, err := s.validateDocumentFields(input.Title, input.Content)
 	if err != nil {
 		return domain.Document{}, err
 	}
-	doc, err := s.store.Patch(ctx, projectID, docID, repositoryID, input.Version, title, input.Content)
+	origin, err := validateDocumentOrigin(input.Origin)
+	if err != nil {
+		return domain.Document{}, err
+	}
+	doc, err := s.store.Patch(ctx, projectID, docID, repositoryID, input.Version, title, input.Content,
+		domain.OriginPatch{Origin: origin, Clear: input.ClearOrigin})
 	return doc, documentError(err)
 }
 

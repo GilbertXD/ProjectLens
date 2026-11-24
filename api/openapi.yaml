@@ -368,7 +368,7 @@ paths:
     delete:
       operationId: "deleteRepository"
       summary: "Disassociate a repository"
-      description: "Removes repository-owned data and requests cancellation of active jobs targeting the repository."
+      description: "Removes the repository's snapshots, files, history, GitHub activity, and sync policies, and requests cancellation of active jobs targeting the repository. Repository-owned documents survive as project-level documents that record the repository under origin."
       security:
         - {"BearerAuth": []}
       responses:
@@ -2170,6 +2170,7 @@ components:
       properties:
         scope: {"$ref": "#/components/schemas/KnowledgeScope"}
         repository_id: {"type": "string", "format": "uuid"}
+        origin: {"$ref": "#/components/schemas/DocumentOrigin"}
         id: {"type": "string", "format": "uuid"}
         project_id: {"type": "string", "format": "uuid"}
         title: {"type": "string"}
@@ -2184,6 +2185,7 @@ components:
       properties:
         scope: {"$ref": "#/components/schemas/KnowledgeScope"}
         repository_id: {"type": "string", "format": "uuid"}
+        origin: {"$ref": "#/components/schemas/DocumentOrigin"}
         id: {"type": "string", "format": "uuid"}
         project_id: {"type": "string", "format": "uuid"}
         title: {"type": "string"}
@@ -2191,6 +2193,14 @@ components:
         version: {"type": "integer", "format": "int64"}
         created_at: {"type": "string", "format": "date-time"}
         updated_at: {"type": "string", "format": "date-time"}
+    DocumentOrigin:
+      type: "object"
+      description: "Informational provenance of a document whose repository was disassociated. Provenance never grants repository scope or ownership."
+      required: ["repository_id", "repository_name"]
+      properties:
+        repository_id: {"type": "string", "format": "uuid"}
+        repository_name: {"type": "string"}
+      additionalProperties: false
     DocumentInput:
       type: "object"
       required: ["title"]
@@ -2206,6 +2216,10 @@ components:
         title: {"type": "string"}
         content: {"type": "string"}
         version: {"type": "integer", "minimum": 1}
+        origin:
+          allOf: [{"$ref": "#/components/schemas/DocumentOrigin"}]
+          nullable: true
+          description: "Replaces the stored provenance. Omitting it or sending null clears it."
       additionalProperties: false
     DocumentPatch:
       type: "object"
@@ -2213,6 +2227,10 @@ components:
         title: {"type": "string"}
         content: {"type": "string"}
         version: {"type": "integer", "minimum": 1}
+        origin:
+          allOf: [{"$ref": "#/components/schemas/DocumentOrigin"}]
+          nullable: true
+          description: "Sets the stored provenance. Sending null clears it. Omitting it leaves it unchanged."
       additionalProperties: false
     DocumentListResult:
       type: "object"

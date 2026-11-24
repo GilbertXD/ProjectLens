@@ -221,7 +221,7 @@ func TestMultiRepositoryIsolation(t *testing.T) {
 	if projectDoc.Scope != domain.KnowledgeScopeProject || projectDoc.RepositoryID != nil {
 		t.Fatalf("project document = %+v", projectDoc)
 	}
-	assertRepositoryDocuments(t, api, base, projectDoc, a, b, c)
+	assertRepositoryDocuments(t, api, base, []domain.Document{projectDoc}, a, b, c)
 	assertForeignRepositoryRequests(t, api, base, a, foreign)
 	assertRepositoryDocumentWrites(t, api, a)
 	if _, err := searchStore.Search(ctx, f.projectID, domain.SearchFilter{Query: "isolationmarker", Limit: 20, RepositoryIDs: []uuid.UUID{a.ID, foreign.ID}}); !errors.Is(err, domain.ErrNotFound) {
@@ -307,8 +307,14 @@ func TestMultiRepositoryIsolation(t *testing.T) {
 		t.Fatalf("surviving repository job = %+v %v", job, err)
 	}
 	request(t, api, "GET", a.path+"/search?q=isolationmarker", "", 404, nil)
-	request(t, api, "GET", base+"/documents/"+a.note.ID.String(), "", 404, nil)
-	assertRepositoryDocuments(t, api, base, projectDoc, b, c)
+	preserved := disassociatedDocument(a.note, a)
+	var kept domain.Document
+	request(t, api, "GET", base+"/documents/"+a.note.ID.String(), "", 200, &kept)
+	if kept.Scope != domain.KnowledgeScopeProject || kept.RepositoryID != nil || !sameOrigin(kept.Origin, preserved.Origin) ||
+		kept.Title != a.note.Title || kept.Version != a.note.Version {
+		t.Fatalf("preserved document = %+v, want %+v", kept, preserved)
+	}
+	assertRepositoryDocuments(t, api, base, []domain.Document{projectDoc, preserved}, b, c)
 	for _, repo := range []isolationRepository{b, c} {
 		assertIsolatedRepository(t, api, repo, a, commonSHA)
 		var policies struct{ Items []domain.Policy }
@@ -324,7 +330,16 @@ func TestMultiRepositoryIsolation(t *testing.T) {
 	}
 	request(t, api, "DELETE", b.path, "", 204, nil)
 	assertDisassociatedData(t, f, b.ID)
-	assertRepositoryDocuments(t, api, base, projectDoc, c)
+	assertRepositoryDocuments(t, api, base, []domain.Document{projectDoc, preserved, disassociatedDocument(b.note, b)}, c)
+}
+
+// disassociatedDocument is the document a repository-owned note becomes once its
+// repository is disassociated: it survives at project level and keeps the
+// repository as informational origin.
+func disassociatedDocument(note domain.Document, repo isolationRepository) domain.Document {
+	note.Scope, note.RepositoryID = domain.KnowledgeScopeProject, nil
+	note.Origin = &domain.DocumentOrigin{RepositoryID: repo.ID, RepositoryName: repo.Name}
+	return note
 }
 
 func assertIsolatedRepository(t *testing.T, api *httptest.Server, repo, neighbor isolationRepository, commonSHA string) {
@@ -410,7 +425,7 @@ func assertIsolatedActivity(t *testing.T, api *httptest.Server, remote isolation
 	}
 }
 
-func assertRepositoryDocuments(t *testing.T, api *httptest.Server, base string, projectDoc domain.Document, repos ...isolationRepository) {
+func assertRepositoryDocuments(t *testing.T, api *httptest.Server, base string, projectDocs []domain.Document, repos ...isolationRepository) {
 	t.Helper()
 	list := func(path string, want ...domain.Document) {
 		t.Helper()
@@ -427,7 +442,7 @@ func assertRepositoryDocuments(t *testing.T, api *httptest.Server, base string, 
 			doc, ok := byID[item.ID]
 			if !ok || item.ProjectID != doc.ProjectID || item.Scope != doc.Scope ||
 				item.Title != doc.Title || item.Version != doc.Version || item.ContentBytes != doc.ContentBytes ||
-				!sameRepositoryID(item.RepositoryID, doc.RepositoryID) {
+				!sameRepositoryID(item.RepositoryID, doc.RepositoryID) || !sameOrigin(item.Origin, doc.Origin) {
 				t.Fatalf("unexpected document summary at %s: %+v", path, item)
 			}
 			delete(byID, item.ID)
@@ -439,13 +454,15 @@ func assertRepositoryDocuments(t *testing.T, api *httptest.Server, base string, 
 		request(t, api, "GET", path, "", 200, &got)
 		if got.ID != want.ID || got.ProjectID != want.ProjectID || got.Scope != want.Scope ||
 			got.Title != want.Title || got.Content != want.Content || got.Version != want.Version ||
-			!sameRepositoryID(got.RepositoryID, want.RepositoryID) {
+			!sameRepositoryID(got.RepositoryID, want.RepositoryID) || !sameOrigin(got.Origin, want.Origin) {
 			t.Fatalf("document at %s = %+v, want %+v", path, got, want)
 		}
 	}
 	docs := base + "/documents"
-	read(docs+"/"+projectDoc.ID.String(), projectDoc)
-	list(docs+"?scope=project", projectDoc)
+	for _, doc := range projectDocs {
+		read(docs+"/"+doc.ID.String(), doc)
+	}
+	list(docs+"?scope=project", projectDocs...)
 	var notes []domain.Document
 	for _, repo := range repos {
 		note := repo.note
@@ -456,7 +473,9 @@ func assertRepositoryDocuments(t *testing.T, api *httptest.Server, base string, 
 		list(docs+"?repository_id="+repo.ID.String(), note)
 		list(repo.path+"/documents", note)
 		read(repo.path+"/documents/"+note.ID.String(), note)
-		request(t, api, "GET", repo.path+"/documents/"+projectDoc.ID.String(), "", 404, nil)
+		for _, doc := range projectDocs {
+			request(t, api, "GET", repo.path+"/documents/"+doc.ID.String(), "", 404, nil)
+		}
 		for _, neighbor := range repos {
 			if neighbor.ID == repo.ID {
 				continue
@@ -469,7 +488,14 @@ func assertRepositoryDocuments(t *testing.T, api *httptest.Server, base string, 
 		}
 	}
 	list(docs+"?scope=repository", notes...)
-	list(docs, append(notes, projectDoc)...)
+	list(docs, append(notes, projectDocs...)...)
+}
+
+func sameOrigin(a, b *domain.DocumentOrigin) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 func sameRepositoryID(a, b *uuid.UUID) bool {
@@ -569,11 +595,22 @@ func assertDisassociatedData(t *testing.T, f *syncFixture, id uuid.UUID) {
 	t.Helper()
 	for _, table := range []string{
 		"snapshots", "source_files", "repository_commits", "repository_history_refs",
-		"github_activity", "github_activity_state", "sync_policies", "documents",
+		"github_activity", "github_activity_state", "sync_policies",
 	} {
 		var count int
 		if err := f.pool.QueryRow(t.Context(), "SELECT count(*) FROM "+table+" WHERE repository_id = $1", id).Scan(&count); err != nil || count != 0 {
 			t.Fatalf("%s has %d rows for disassociated repository %s: %v", table, count, id, err)
 		}
+	}
+	// Documents are user-authored notes: they survive as project-level documents
+	// that keep the repository as informational provenance.
+	var scoped, preserved int
+	if err := f.pool.QueryRow(t.Context(), "SELECT count(*) FROM documents WHERE repository_id = $1", id).Scan(&scoped); err != nil || scoped != 0 {
+		t.Fatalf("documents still scoped to disassociated repository %s: %d rows, %v", id, scoped, err)
+	}
+	if err := f.pool.QueryRow(t.Context(),
+		"SELECT count(*) FROM documents WHERE repository_id IS NULL AND metadata->'origin'->>'repository_id' = $1",
+		id.String()).Scan(&preserved); err != nil || preserved == 0 {
+		t.Fatalf("documents of disassociated repository %s were not preserved with origin: %d rows, %v", id, preserved, err)
 	}
 }
