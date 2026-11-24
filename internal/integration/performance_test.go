@@ -114,7 +114,9 @@ func TestBackendLoad(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if err := explain(conn, txctx, "search", sql, f.projectID, filter.Query, []string{}, nil, "", 20, 0, "StartSel=QQ, StopSel=ZZ", "StartSel=QQ, StopSel=ZZ, HighlightAll=true", "QQ"); err != nil {
+		if err := explain(conn, txctx, "search", sql, f.projectID, filter.Query, []string{}, filter.RepositoryID, "", filter.Limit, filter.Offset,
+			"StartSel=QQ, StopSel=ZZ", "StartSel=QQ, StopSel=ZZ, HighlightAll=true", "QQ",
+			filter.Scope, filter.RepositoryIDs, filter.RepositoryRole, filter.IncludeProjectDocuments); err != nil {
 			return err
 		}
 		sql, err = prepared("%jsonb_agg(c.metadata ORDER BY s.pos)%")

@@ -933,7 +933,7 @@ paths:
         - {"name": "scope", "in": "query", "schema": {"$ref": "#/components/schemas/SearchScope"}, "description": "Required unless a repository filter determines it. project reads project-level documents only, repository reads one repository and requires repository_id, cross_repository reads repositories optionally narrowed by repository_ids or repository_role, and all reads the whole project."}
         - {"name": "repository_ids", "in": "query", "schema": {"type": "array", "items": {"type": "string", "format": "uuid"}}, "style": "form", "explode": true, "description": "Cross-repository selection. Repeat the parameter or supply comma-separated UUIDs. Implies cross_repository scope."}
         - {"name": "repository_role", "in": "query", "schema": {"$ref": "#/components/schemas/RepositoryRole"}, "description": "Cross-repository selection by role. Implies cross_repository scope."}
-        - {"name": "include_project_documents", "in": "query", "schema": {"type": "boolean", "default": false}, "description": "Include project-level documents in cross-repository search. Requires scope=cross_repository."}
+        - {"name": "include_project_documents", "in": "query", "schema": {"type": "boolean", "default": false}, "description": "Valid only in cross_repository scope, whether explicit or inferred from the repository filters. Set to true to include project-level documents in the results."}
         - {"name": "path_prefix", "in": "query", "schema": {"type": "string"}}
         - {"$ref": "#/components/parameters/Limit"}
         - {"$ref": "#/components/parameters/Offset"}

@@ -64,8 +64,9 @@ func (c *searchTestCache) Set(_ context.Context, key string, p []byte, ttl time.
 
 func TestSearchFilterValidation(t *testing.T) {
 	store := &searchTestStore{version: 1}
+	cache := &searchTestCache{data: make(map[string][]byte)}
 	cfg := config.SearchConfig{DefaultLimit: 3, MaxLimit: 5, MaxQueryLength: 2, CacheTTL: time.Minute}
-	svc := NewSearchService(store, nil, cfg, "test", nil)
+	svc := NewSearchService(store, cache, cfg, "test", nil)
 	id := uuid.NewString()
 	repoID := uuid.New()
 	if _, err := svc.Search(t.Context(), "invalid", domain.SearchFilter{Query: "ok"}); !errors.Is(err, domain.ErrInvalidInput) {
@@ -95,11 +96,12 @@ func TestSearchFilterValidation(t *testing.T) {
 			t.Errorf("filter %+v: %v", f, err)
 		}
 	}
-	if store.reads != 0 {
-		t.Fatal("invalid filters reached PostgreSQL")
+	if store.reads != 0 || store.searches != 0 || cache.gets != 0 || cache.sets != 0 {
+		t.Fatalf("invalid filters accessed store or cache: version reads=%d, searches=%d, cache gets=%d, cache sets=%d",
+			store.reads, store.searches, cache.gets, cache.sets)
 	}
 	result, err := svc.Search(t.Context(), id, domain.SearchFilter{Query: " 搜索 ", Scope: domain.SearchScopeAll})
-	if err != nil || result.Query != "搜索" || result.Limit != 3 || result.CacheStatus != domain.SearchCacheStatusBypass {
+	if err != nil || result.Query != "搜索" || result.Limit != 3 || result.CacheStatus != domain.SearchCacheStatusMiss {
 		t.Fatalf("validated search = %+v, %v", result, err)
 	}
 }

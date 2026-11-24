@@ -43,7 +43,6 @@ func (h *SearchHandler) search(c *gin.Context) {
 			err = fmt.Errorf("%w: invalid repository ID", domain.ErrInvalidInput)
 		case filter.RepositoryID != nil && *filter.RepositoryID != id,
 			len(filter.RepositoryIDs) > 0, filter.RepositoryRole != "",
-			filter.IncludeProjectDocuments,
 			filter.Scope != "" && filter.Scope != domain.SearchScopeRepository:
 			err = fmt.Errorf("%w: repository search filters must match the repository in the path", domain.ErrInvalidInput)
 		default:
@@ -128,6 +127,9 @@ func readSearchFilter(rawQuery string) (domain.SearchFilter, error) {
 			}
 			filter.RepositoryIDs = append(filter.RepositoryIDs, id)
 		}
+	}
+	if values.Has("include_project_documents") && filter.EffectiveScope() != domain.SearchScopeCrossRepository {
+		return domain.SearchFilter{}, fmt.Errorf("%w: include_project_documents requires cross_repository scope", domain.ErrInvalidInput)
 	}
 	for _, field := range []struct {
 		name string

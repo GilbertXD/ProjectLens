@@ -496,7 +496,7 @@ func TestUnifiedSearchRedisOutage(t *testing.T) {
 	}
 	offlineServer := startHTTP(f.cfg, f.pool, startupCache)
 	t.Cleanup(offlineServer.Close)
-	if result := searchRequest(t, offlineServer, path, domain.SearchCacheStatusDegraded); result.Total != 1 {
+	if result := searchRequest(t, offlineServer, path, domain.SearchCacheStatusDegraded); result.Total != offline.Total || !reflect.DeepEqual(result.Items, offline.Items) {
 		t.Fatalf("search after unavailable startup = %+v", result)
 	}
 	request(t, offlineServer, "GET", "/readyz", "", 200, nil)
