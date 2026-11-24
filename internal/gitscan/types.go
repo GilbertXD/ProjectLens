@@ -7,6 +7,7 @@ import (
 )
 
 type SourceSpec struct {
+	depth      int
 	SourceType domain.RepositorySourceType
 	Source     string
 	Ref        string

@@ -72,6 +72,21 @@ func TestRemoteManifestParity(t *testing.T) {
 		})
 	}
 	group.Wait()
+	page, err := scanner.History(t.Context(), remote, 100, func(ids []string) (map[string]bool, error) {
+		m := map[string]bool{}
+		for _, id := range ids {
+			m[id] = true
+		}
+		return m, nil
+	}, func(c HistoryCommit, changes Changes) error {
+		if !strings.HasPrefix(c.URL, "https://github.com/owner/project/commit/") {
+			t.Fatal(c.URL)
+		}
+		return nil
+	})
+	if err != nil || page.Imported != 2 || page.Tip != head {
+		t.Fatalf("remote history=%+v err=%v", page, err)
+	}
 	entries, err := os.ReadDir(cfg.CacheDir)
 	if err != nil || len(entries) != 2 {
 		t.Fatalf("expected one cache and its lock: %v, %v", entries, err)
@@ -161,7 +176,7 @@ exit 0
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if err := fetchCommit(t.Context(), gitRunner{}, dir, "https://github.com/owner/project.git", "HEAD"); err != nil {
+	if err := fetchCommit(t.Context(), gitRunner{}, dir, "https://github.com/owner/project.git", "HEAD", 1); err != nil {
 		t.Fatal(err)
 	}
 }

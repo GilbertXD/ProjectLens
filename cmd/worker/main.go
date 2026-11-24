@@ -92,6 +92,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer snapshotStore.Close()
+	history := &service.HistoryService{Repositories: repositoryStore, Locks: snapshotStore, Scanner: scanner, Tx: db.NewPgxTxManager(pool)}
+	if err := worker.RegisterTarget(registry, "repository.commits.sync", history.Sync); err != nil {
+		log.Error("register history handler", "error", err)
+		return 1
+	}
 	syncer := service.NewSyncService(repositoryStore, snapshotStore, db.NewPgxTxManager(pool), scanner, cfg.Sync, log)
 	if err := worker.RegisterSyncHandler(registry, syncer); err != nil {
 		fmt.Fprintf(stderr, "register repository sync handler: %v\n", err)

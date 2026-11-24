@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -128,7 +129,7 @@ func (s *RemoteSource) Prepare(ctx context.Context, spec SourceSpec) (*PreparedR
 			return nil, remoteError(err)
 		}
 	}
-	if err := fetchCommit(ctx, git, fetchDir, cloneURL, ref); err != nil {
+	if err := fetchCommit(ctx, git, fetchDir, cloneURL, ref, max(1, spec.depth)); err != nil {
 		return nil, err
 	}
 	oid, err := git.resolve(ctx, fetchDir, "FETCH_HEAD")
@@ -150,9 +151,9 @@ func (s *RemoteSource) Prepare(ctx context.Context, spec SourceSpec) (*PreparedR
 	}, nil
 }
 
-func fetchCommit(ctx context.Context, git gitRunner, dir, cloneURL, ref string) error {
+func fetchCommit(ctx context.Context, git gitRunner, dir, cloneURL, ref string, depth int) error {
 	args := []string{"--git-dir=" + dir, "fetch", "--no-tags", "--prune", "--no-auto-maintenance"}
-	shallow := append(append([]string(nil), args...), "--depth=1", "--", cloneURL, ref)
+	shallow := append(append([]string(nil), args...), "--depth="+strconv.Itoa(depth), "--", cloneURL, ref)
 	_, err := git.run(ctx, 8192, true, shallow...)
 	if err == nil {
 		return nil

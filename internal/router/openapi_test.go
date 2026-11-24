@@ -28,6 +28,7 @@ func TestOpenAPIRouteParity(t *testing.T) {
 	}
 	engine := New(cfg, log, Dependencies{
 		Projects: handler.NewProjectHandler(nil, log), Repositories: handler.NewRepositoryHandler(nil, log),
+		History:   &handler.HistoryHandler{Log: log},
 		Snapshots: handler.NewSnapshotHandler(nil, log), Documents: handler.NewDocumentHandler(nil, log, 0),
 		Jobs: handler.NewJobHandler(nil, log), Search: handler.NewSearchHandler(nil, log),
 	})

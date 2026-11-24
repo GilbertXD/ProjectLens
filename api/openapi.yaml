@@ -874,6 +874,77 @@ paths:
         "500": {"$ref": "#/components/responses/InternalError"}
         "503": {"$ref": "#/components/responses/ServiceUnavailable"}
         "504": {"$ref": "#/components/responses/RequestTimeout"}
+  "/api/v1/projects/{id}/repositories/{repoId}/commits":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+      - {"in": "query", "name": "ref", "required": false, "schema": {"type": "string"}}
+      - {"in": "query", "name": "offset", "required": false, "schema": {"type": "integer"}}
+      - {"in": "query", "name": "limit", "required": false, "schema": {"type": "integer"}}
+    get:
+      operationId: listCommits
+      summary: "listCommits"
+      security: [{BearerAuth: []}]
+      responses:
+        "200": {"description": "History result"}
+        "400": {"description": "Invalid parameters"}
+        "404": {"description": "Repository or history not found"}
+  "/api/v1/projects/{id}/repositories/{repoId}/commits/{sha}":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+      - {"in": "path", "name": "sha", "required": true, "schema": {"type": "string"}}
+    get:
+      operationId: getCommit
+      summary: "getCommit"
+      security: [{BearerAuth: []}]
+      responses:
+        "200": {"description": "History result"}
+        "400": {"description": "Invalid parameters"}
+        "404": {"description": "Repository or history not found"}
+  "/api/v1/projects/{id}/repositories/{repoId}/commits/{sha}/files":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+      - {"in": "path", "name": "sha", "required": true, "schema": {"type": "string"}}
+      - {"in": "query", "name": "offset", "required": false, "schema": {"type": "integer"}}
+      - {"in": "query", "name": "limit", "required": false, "schema": {"type": "integer"}}
+    get:
+      operationId: listCommitFiles
+      summary: "listCommitFiles"
+      security: [{BearerAuth: []}]
+      responses:
+        "200": {"description": "History result"}
+        "400": {"description": "Invalid parameters"}
+        "404": {"description": "Repository or history not found"}
+  "/api/v1/projects/{id}/repositories/{repoId}/compare":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+      - {"in": "query", "name": "base", "required": true, "schema": {"type": "string"}}
+      - {"in": "query", "name": "head", "required": true, "schema": {"type": "string"}}
+      - {"in": "query", "name": "offset", "required": false, "schema": {"type": "integer"}}
+      - {"in": "query", "name": "limit", "required": false, "schema": {"type": "integer"}}
+    get:
+      operationId: compareCommits
+      summary: "compareCommits"
+      security: [{BearerAuth: []}]
+      responses:
+        "200": {"description": "History result"}
+        "400": {"description": "Invalid parameters"}
+        "404": {"description": "Repository or history not found"}
+  "/api/v1/projects/{id}/repositories/{repoId}/commits/sync":
+    parameters:
+      - {"$ref": "#/components/parameters/id"}
+      - {"$ref": "#/components/parameters/repoId"}
+    post:
+      operationId: syncCommits
+      summary: "Import reachable history for the optional JSON ref"
+      security: [{BearerAuth: []}]
+      responses:
+        "200": {"description": "Active job reused"}
+        "202": {"description": "Job queued"}
+        "409": {"description": "Different ref active"}
 components:
   securitySchemes:
     BearerAuth:

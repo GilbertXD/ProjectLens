@@ -89,6 +89,8 @@ type gitError struct {
 func (e *gitError) Error() string { return fmt.Sprintf("git command failed: %v", e.err) }
 func (e *gitError) Unwrap() error { return e.err }
 
+var errOutputLimit = errors.New("Git output exceeded the scanner limit")
+
 func (g gitRunner) run(ctx context.Context, limit int, auth bool, args ...string) ([]byte, error) {
 	cmd := g.command(ctx, auth, args...)
 	stdout := &boundedOutput{limit: limit}
@@ -108,7 +110,7 @@ func (g gitRunner) run(ctx context.Context, limit int, auth bool, args ...string
 		return nil, &gitError{err: err, diagnostic: diagnostic}
 	}
 	if stdout.truncated {
-		return nil, errors.New("Git output exceeded the scanner limit")
+		return stdout.buffer.Bytes(), errOutputLimit
 	}
 	return stdout.buffer.Bytes(), nil
 }
