@@ -1,0 +1,23 @@
+:root {
+  --lens-paper: #FFFFFF;
+  --lens-rail: #F5F6F7;
+  --lens-ink: #121316;
+  --lens-graphite: #5A606B;
+  --lens-rule: #DFE2E7;
+  --lens-focus: #2C3038;
+
+  --lens-healthy-ink: #1E5631;
+  --lens-healthy-tint: #EEF5F0;
+  --lens-error-ink: #8B2635;
+  --lens-error-tint: #FAF0F1;
+  --lens-warning-ink: #7A4E0B;
+  --lens-warning-tint: #FBF6EC;
+
+  --lens-font-display: 'Newsreader', Georgia, serif;
+  --lens-font-ui: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --lens-font-code: 'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace;
+
+  --lens-home-width: 1120px;
+  --lens-rail-width: 228px;
+  --lens-content-gutter: clamp(1.25rem, 4vw, 3.5rem);
+}
