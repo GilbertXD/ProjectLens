@@ -1,11 +1,15 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createMemoryRouter } from 'react-router-dom'
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from '@/App'
 import { documentPath, projectPath, repositoryPath } from '@/components/shared/format'
 import { fixtureIds, searchPath } from '@/mocks/fixtures'
 import { routes } from '@/routes/router'
+import { mockApi } from './apiFixture'
+
+beforeEach(() => { mockApi() })
+afterEach(() => { vi.unstubAllGlobals() })
 
 const core = projectPath(fixtureIds.core)
 const api = repositoryPath(fixtureIds.core, fixtureIds.api)
@@ -35,20 +39,20 @@ describe('Prototype interactions', () => {
     await user.click(screen.getByRole('button', { name: 'Archive project' }))
     await user.click(screen.getByRole('link', { name: 'All projects' }))
     await user.selectOptions(screen.getByLabelText('Project status'), 'archived')
-    expect(row(/Release Engineering/).getByText('Archived')).toBeVisible()
+    expect(within(await screen.findByRole('row', { name: /Release Engineering/ })).getByText('Archived')).toBeVisible()
     await user.click(row(/Release Engineering/).getByRole('button', { name: 'Restore' }))
-    expect(screen.queryByRole('row', { name: /Release Engineering/ })).toBeNull()
+    await waitFor(() => expect(screen.queryByRole('row', { name: /Release Engineering/ })).toBeNull())
     await user.selectOptions(screen.getByLabelText('Project status'), 'active')
-    await user.click(row(/Release Engineering/).getByRole('button', { name: 'Delete' }))
+    await user.click(within(await screen.findByRole('row', { name: /Release Engineering/ })).getByRole('button', { name: 'Delete' }))
     expect(dialog().getByRole('button', { name: 'Cancel' })).toHaveFocus()
     expect(dialog().getByText(/permanently deletes the project/i)).toBeVisible()
     await user.click(dialog().getByRole('button', { name: 'Delete project' }))
-    expect(screen.queryByRole('row', { name: /Release Engineering/ })).toBeNull()
+    await waitFor(() => expect(screen.queryByRole('row', { name: /Release Engineering/ })).toBeNull())
   })
 
   it('enforces scope filters and follows a result to its exact file and line', async () => {
     const { user, router } = openConsole(core + '/search')
-    const scope = screen.getByLabelText('Search scope')
+    const scope = await screen.findByLabelText('Search scope')
     const search = screen.getByRole('button', { name: 'Search' })
     await user.type(screen.getByLabelText('Query'), 'search')
     await user.click(search)
@@ -78,12 +82,12 @@ describe('Prototype interactions', () => {
     expect(router.state.location.pathname).toBe(api + '/files')
     expect(new URLSearchParams(router.state.location.search).get('path')).toBe(searchPath)
     expect(router.state.location.hash).toBe('#L1')
-    expect(screen.getByRole('link', { name: 'Line 1' }).closest('li')).toHaveClass('selected-line')
+    expect((await screen.findByRole('link', { name: 'Line 1' })).closest('li')).toHaveClass('selected-line')
   })
 
   it('finds project documents across scope changes without carrying repository or file filters', async () => {
     const { user } = openConsole(core + '/search')
-    const scope = screen.getByLabelText('Search scope')
+    const scope = await screen.findByLabelText('Search scope')
     await user.type(screen.getByLabelText('Query'), 'search')
     await user.selectOptions(scope, 'all')
     await user.click(screen.getByLabelText('Local Git'))
@@ -99,7 +103,7 @@ describe('Prototype interactions', () => {
 
   it('creates a repository-owned document, preserves the conflict draft, and deletes the document', async () => {
     const { user } = openConsole(core + '/documents')
-    expect(screen.getByText('Origin: indexer-v1')).toBeVisible()
+    expect(await screen.findByText('Origin: indexer-v1')).toBeVisible()
     await user.selectOptions(screen.getByLabelText('Document scope'), fixtureIds.api)
     expect(screen.queryByText('Origin: indexer-v1')).toBeNull()
     await user.click(screen.getByRole('button', { name: 'Create document' }))
@@ -126,9 +130,10 @@ describe('Prototype interactions', () => {
 
   it('moves repository-owned documents to project scope with read-only origin on disassociation', async () => {
     const { user, router } = openConsole(api + '/settings')
-    await user.click(screen.getByRole('button', { name: 'Disassociate repository' }))
+    await user.click(await screen.findByRole('button', { name: 'Disassociate repository' }))
     expect(dialog().getByText(/documents survive as project-level documents with read-only origin/)).toBeVisible()
     await user.click(dialog().getByRole('button', { name: 'Disassociate repository' }))
+    await screen.findByRole('table', { name: 'Repositories' })
     expect(screen.queryByRole('link', { name: 'projectlens-api' })).toBeNull()
     await user.click(within(screen.getByRole('navigation', { name: 'Project navigation' })).getByRole('link', { name: 'Documents' }))
     const moved = row(/Search route contract/)
@@ -142,44 +147,45 @@ describe('Prototype interactions', () => {
 
   it('publishes a snapshot and opens its succeeded job', async () => {
     const { user } = openConsole(api + '/snapshots')
-    await user.click(screen.getByRole('button', { name: 'Publish snapshot' }))
-    expect(screen.getByRole('link', { name: 'Publication job' })).toBeVisible()
+    await user.click(await screen.findByRole('button', { name: 'Publish snapshot' }))
+    expect(await screen.findByRole('link', { name: 'Publication job' })).toBeVisible()
     await waitFor(() => expect(row(/v3 Active/).getByText('v3')).toBeVisible(), { timeout: 4000 })
     expect(row(/v2 Superseded/).getByText('Superseded')).toBeVisible()
     await user.click(screen.getByRole('link', { name: 'Latest file sync job' }))
     expect(screen.getByRole('heading', { name: 'Job details' })).toBeVisible()
-    expect(screen.getByText(/"snapshot_id"/)).toBeVisible()
+    expect(await screen.findByText(/"snapshot_id"/)).toBeVisible()
   }, 6000)
 
   it('associates a GitHub repository, edits it, and saves its sync policy', async () => {
     const { user } = openConsole(core + '/repositories')
-    await user.click(screen.getByRole('button', { name: 'Associate repository' }))
+    await user.click(await screen.findByRole('button', { name: 'Associate repository' }))
     await user.selectOptions(dialog().getByLabelText('Source type'), 'github')
     await user.type(dialog().getByLabelText('GitHub owner'), 'projectlens')
     await user.type(dialog().getByLabelText('GitHub repository'), 'developer-guide')
     await user.selectOptions(dialog().getByLabelText('Role'), 'reference')
     await user.click(dialog().getByRole('button', { name: 'Associate repository' }))
-    await user.click(screen.getByRole('link', { name: 'projectlens/developer-guide' }))
+    await user.click(await screen.findByRole('link', { name: 'projectlens/developer-guide' }))
     const tabs = within(await screen.findByRole('navigation', { name: 'Repository sections' }))
     await user.click(tabs.getByRole('link', { name: 'Settings' }))
     await user.clear(screen.getByLabelText('Name'))
     await user.type(screen.getByLabelText('Name'), 'Developer guide')
     await user.click(screen.getByRole('button', { name: 'Save repository' }))
-    expect(screen.getByRole('heading', { name: 'Developer guide' })).toBeVisible()
-    await user.click(screen.getByLabelText('Enable GitHub activity sync'))
+    expect(await screen.findByRole('heading', { name: 'Developer guide' })).toBeVisible()
+    await user.click(await screen.findByLabelText('Enable GitHub activity sync'))
     const interval = screen.getByLabelText('GitHub activity interval (seconds)')
     await user.clear(interval)
     await user.type(interval, '900')
     await user.click(screen.getByRole('button', { name: 'Save GitHub activity policy' }))
+    expect(await screen.findByText('Saved', { selector: '[role=status]' })).toBeVisible()
     await user.click(tabs.getByRole('link', { name: 'Files' }))
     await user.click(tabs.getByRole('link', { name: 'Settings' }))
-    expect(screen.getByLabelText('Enable GitHub activity sync')).toBeChecked()
+    expect(await screen.findByLabelText('Enable GitHub activity sync')).toBeChecked()
     expect(screen.getByLabelText('GitHub activity interval (seconds)')).toHaveValue(900)
   })
 
   it('opens commit detail, displays a unified diff, and toggles file annotations', async () => {
     const { user } = openConsole(api + '/commits')
-    await user.click(screen.getByRole('link', { name: 'Require an explicit search scope' }))
+    await user.click(await screen.findByRole('link', { name: 'Require an explicit search scope' }))
     expect(screen.getByRole('table', { name: 'Changed files' })).toBeVisible()
     await user.click(screen.getByRole('button', { name: 'Compare commits' }))
     await user.click(screen.getByRole('button', { name: 'Show diff' }))
@@ -197,14 +203,14 @@ describe('Prototype interactions', () => {
   it('filters jobs and cancels a pending job from the inspector', async () => {
     const { user } = openConsole('/jobs')
     await user.selectOptions(screen.getByLabelText('Job status'), 'pending')
-    await user.click(screen.getByRole('button', { name: /Scan repository/ }))
-    await user.click(screen.getByRole('button', { name: 'Cancel job' }))
-    expect(screen.getByText('Cancelled', { selector: '.status-badge' })).toBeVisible()
+    await user.click(await screen.findByRole('button', { name: /Scan repository/ }))
+    await user.click(await screen.findByRole('button', { name: 'Cancel job' }))
+    expect(await screen.findByText('Cancelled', { selector: '.status-badge' })).toBeVisible()
     expect(screen.queryByRole('button', { name: 'Cancel job' })).toBeNull()
-    expect(screen.getByText('No jobs match these filters.')).toBeVisible()
+    expect(await screen.findByText('No jobs match these filters.')).toBeVisible()
   })
 
-  it('clears the in-memory token on origin changes and uses the mock ping response', async () => {
+  it('clears the in-memory token on origin changes and uses the live ping response', async () => {
     const storageKey = 'projectlens.apiOrigin'
     try {
       const { user } = openConsole('/settings')
@@ -221,8 +227,8 @@ describe('Prototype interactions', () => {
       await user.click(screen.getByRole('button', { name: 'Save connection' }))
       expect(localStorage.getItem(storageKey)).toBe('https://console.example.test')
       expect(token).toHaveValue('')
-      await user.click(screen.getByRole('button', { name: 'Test API ping' }))
-      expect(screen.getByRole('status')).toHaveTextContent('Preview API returned pong.')
+      await user.click(screen.getByRole('button', { name: 'Test connection' }))
+      expect(await screen.findByText('API returned pong.', { selector: '[role=status]' })).toBeVisible()
       expect(screen.getByRole('link', { name: 'OpenAPI YAML' })).toHaveAttribute('href', 'https://console.example.test/openapi.yaml')
     } finally {
       localStorage.removeItem(storageKey)

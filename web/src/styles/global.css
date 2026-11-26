@@ -202,14 +202,9 @@
   overflow-wrap: anywhere;
 }
 
-.workspace-rail__project code, .workspace-rail__preview {
+.workspace-rail__project code {
   color: var(--lens-graphite);
   font-size: 0.8125rem;
-}
-
-.workspace-rail__preview {
-  margin-top: auto;
-  padding-top: 1.5rem;
 }
 
 .workspace-nav {
@@ -642,6 +637,25 @@ input[type="checkbox"] {
   min-width: 7rem;
 }
 
+.global-home .stacked-cell {
+  min-width: 12rem;
+}
+
+.global-home .stacked-cell code {
+  white-space: nowrap;
+}
+
+.global-home .stacked-cell code.slug--long {
+  white-space: normal;
+}
+
+.connection-warning {
+  padding: 0.625rem clamp(1rem, 4vw, 3rem);
+  border-bottom: 1px solid var(--lens-rule);
+  color: var(--lens-warning-ink);
+  background: var(--lens-warning-tint);
+}
+
 .stacked-cell code {
   color: var(--lens-graphite);
   font-size: 0.8125rem;
@@ -1032,9 +1046,5 @@ textarea.markdown-editor {
   .workspace-rail__project {
     margin-block: 0.75rem 0.5rem;
     padding-bottom: 0.75rem;
-  }
-
-  .workspace-rail__preview {
-    padding-top: 0.5rem;
   }
 }

@@ -1,10 +1,14 @@
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createMemoryRouter } from 'react-router-dom'
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from '@/App'
 import { fixtureIds, repositoryPreviews } from '@/mocks/fixtures'
+import { mockApi } from '@/pages/__tests__/apiFixture'
 import { routes } from '../router'
+
+beforeEach(() => { mockApi() })
+afterEach(() => { vi.unstubAllGlobals() })
 
 function renderConsole(path: string) {
   const router = createMemoryRouter(routes, { initialEntries: [path] })

@@ -4,7 +4,8 @@ import type { RouteObject } from 'react-router-dom'
 import { ConsoleLayout } from '@/App'
 import { PageHeading } from '@/components/shared/SectionRule'
 import { StatusBadge } from '@/components/ui/StatusBadge'
-import { useMockConsole } from '@/mocks/MockConsoleProvider'
+import { ApiContent } from '@/api/ApiFeedback'
+import { useProjectQuery } from '@/api/queries'
 import { JobsPage } from '@/pages/global/JobsPage'
 import { ProjectsPage } from '@/pages/global/ProjectsPage'
 import { SettingsPage } from '@/pages/global/SettingsPage'
@@ -28,10 +29,13 @@ const workspaceSections = [
 
 function ProjectLayout() {
   const { projectId } = useParams()
-  const { projects } = useMockConsole()
-  const project = projects.find(({ id }) => id === projectId)
+  const query = useProjectQuery(projectId ?? '')
+  const project = query.data
 
-  if (!project) return <MissingPage title="Project not found" />
+  if (!project || query.error) return <main id="main-content" tabIndex={-1} className="home-container global-page">
+    <ApiContent query={query} loading="Loading project…">{null}</ApiContent>
+    <Link className="text-link" to="/">Return to Projects</Link>
+  </main>
 
   return (
     <div className="workspace">
@@ -44,7 +48,6 @@ function ProjectLayout() {
         <nav className="workspace-nav" aria-label="Project navigation">
           {workspaceSections.map(({ path, title }) => <NavLink key={path} to={path}>{title}</NavLink>)}
         </nav>
-        <p className="workspace-rail__preview">Preview data</p>
       </aside>
       <main id="main-content" tabIndex={-1} className="workspace-main" key={project.id}>
         <Suspense fallback={<p className="rule-message" role="status">Loading workspace view…</p>}>

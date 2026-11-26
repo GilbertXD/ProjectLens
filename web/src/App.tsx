@@ -1,22 +1,26 @@
+import { useState } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Link, NavLink, Outlet, RouterProvider, useMatch } from 'react-router-dom'
 import type { RouterProviderProps } from 'react-router-dom'
 import { LensMark } from '@/components/brand/LensMark'
+import { ConnectionProvider, useConnection } from '@/api/ConnectionProvider'
 import { MockConsoleProvider } from '@/mocks/MockConsoleProvider'
 
-const queryClient = new QueryClient()
-
 export function App({ router }: Pick<RouterProviderProps, 'router'>) {
+  const [queryClient] = useState(() => new QueryClient({ defaultOptions: { queries: { retry: false } } }))
   return (
     <QueryClientProvider client={queryClient}>
-      <MockConsoleProvider>
-        <RouterProvider router={router} />
-      </MockConsoleProvider>
+      <ConnectionProvider>
+        <MockConsoleProvider>
+          <RouterProvider router={router} />
+        </MockConsoleProvider>
+      </ConnectionProvider>
     </QueryClientProvider>
   )
 }
 
 export function ConsoleLayout() {
+  const { unauthorized } = useConnection()
   const inWorkspace = useMatch('/projects/:projectId/*')
 
   return (
@@ -35,6 +39,9 @@ export function ConsoleLayout() {
           </nav>
         </div>
       </header>
+      {unauthorized && <div className="connection-warning" role="alert">
+        The API rejected authentication. <Link className="text-link" to="/settings">Check connection settings</Link>
+      </div>}
       <Outlet />
     </>
   )
