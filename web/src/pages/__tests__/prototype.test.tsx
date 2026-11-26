@@ -5,7 +5,7 @@ import { createMemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from '@/App'
 import { documentPath, projectPath, repositoryPath } from '@/components/shared/format'
-import { fixtureIds, searchPath } from '@/mocks/fixtures'
+import { fixtureIds, searchPath } from '@/test/fixtures'
 import { routes } from '@/routes/router'
 import { mockApi } from './apiFixture'
 

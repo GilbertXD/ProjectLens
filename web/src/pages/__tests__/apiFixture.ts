@@ -1,6 +1,6 @@
 import { vi } from 'vitest'
-import { documents, emptyRepository, fixtureIds, health, jobs, makeJob, projects, publishSnapshot, repositoryPreviews } from '@/mocks/fixtures'
-import { mockSearch, type ScopeFilters } from '@/mocks/search'
+import { documents, emptyRepository, fixtureIds, health, jobs, makeJob, projects, publishSnapshot, repositoryPreviews } from '@/test/fixtures'
+import { mockSearch, type ScopeFilters } from '@/test/mockSearch'
 import type { Document, Job, Project, Repository, SearchSourceType } from '@/types/domain'
 
 export const json = (body: unknown, status = 200, headers?: HeadersInit) => Response.json(body, { status, headers })
@@ -162,7 +162,7 @@ export function mockApi(
         const searchKey = searchVersion + ':' + pathname + url.search
         const cache = searched.has(searchKey) ? 'hit' : 'miss'
         searched.add(searchKey)
-        return json(mockSearch({ projects: projectList, repositories: repos, documents: documentList, jobs: jobList, searchVersion },
+        return json(mockSearch({ repositories: repos, documents: documentList, searchVersion },
           id, { ...ownership, q, source_type: values('source_type') as SearchSourceType[],
             path_prefix: searchParams.get('path_prefix') ?? '' }, offset, limit, cache), 200,
         { 'X-Search-Cache': cache, 'X-Search-Version': String(searchVersion) })

@@ -112,7 +112,10 @@
   text-decoration: none;
 }
 
-.global-nav a:hover,
+.global-nav a:hover {
+  color: var(--lens-ink);
+}
+
 .global-nav a[aria-current="page"],
 .global-nav a.within-projects {
   border-bottom-color: var(--lens-ink);

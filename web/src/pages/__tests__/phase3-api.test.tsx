@@ -4,7 +4,7 @@ import { createMemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { App } from '@/App'
 import { jobPollInterval } from '@/api/queries'
-import { documents, fixtureIds, jobs, projects, repositoryPreviews } from '@/mocks/fixtures'
+import { documents, fixtureIds, jobs, projects, repositoryPreviews } from '@/test/fixtures'
 import { routes } from '@/routes/router'
 import { json, mockApi, problem } from './apiFixture'
 
@@ -94,6 +94,7 @@ describe('Phase 3 HTTP integration', () => {
     await user.click(screen.getByRole('button', { name: 'Test connection' }))
     expect(await screen.findByText('ping-401')).toBeVisible()
     expect(screen.getByText('Bearer token required')).toBeVisible()
+    expect(screen.getByText('Set a valid Bearer token in Settings before retrying.')).toBeVisible()
     expect(screen.getByRole('link', { name: 'Check connection settings' })).toHaveAttribute('href', '/settings')
 
     await user.type(screen.getByLabelText('Bearer token'), 'memory-only')

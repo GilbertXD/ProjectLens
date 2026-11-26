@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { createMemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from '@/App'
-import { fixtureIds, repositoryPreviews } from '@/mocks/fixtures'
+import { fixtureIds, repositoryPreviews } from '@/test/fixtures'
 import { mockApi } from '@/pages/__tests__/apiFixture'
 import { routes } from '../router'
 
@@ -16,6 +16,12 @@ function renderConsole(path: string) {
   return router
 }
 
+function expectActiveGlobalLink(name: string) {
+  const nav = within(screen.getByRole('navigation', { name: 'Global navigation' }))
+  const active = nav.getAllByRole('link').filter((link) => link.matches('[aria-current="page"], .within-projects'))
+  expect(active).toEqual([nav.getByRole('link', { name })])
+}
+
 describe('Global navigation', () => {
   it('renders the Projects masthead and navigates to Jobs and Settings', async () => {
     const user = userEvent.setup()
@@ -24,12 +30,15 @@ describe('Global navigation', () => {
     expect(screen.getByRole('heading', { name: 'Projects' })).toBeVisible()
     expect(nav.getByRole('link', { name: 'Projects' })).toHaveAttribute('aria-current', 'page')
     expect(screen.queryByRole('navigation', { name: 'Project navigation' })).toBeNull()
+    expectActiveGlobalLink('Projects')
 
     await user.click(nav.getByRole('link', { name: 'Jobs' }))
     expect(screen.getByRole('heading', { name: 'Jobs' })).toBeVisible()
+    expectActiveGlobalLink('Jobs')
     await user.click(nav.getByRole('link', { name: 'Settings' }))
     expect(screen.getByRole('heading', { name: 'Settings' })).toBeVisible()
     expect(nav.getByRole('link', { name: 'Settings' })).toHaveAttribute('aria-current', 'page')
+    expectActiveGlobalLink('Settings')
   })
 
   it('offers a way back from an unknown route', () => {
@@ -46,6 +55,7 @@ describe('Project workspace', () => {
     expect(await screen.findByRole('heading', { name: 'Overview' })).toBeVisible()
     expect(router.state.location.pathname).toBe('/projects/' + fixtureIds.core + '/overview')
     expect(screen.getByRole('navigation', { name: 'Global navigation' })).toBeVisible()
+    expectActiveGlobalLink('Projects')
 
     const nav = within(screen.getByRole('navigation', { name: 'Project navigation' }))
     expect(nav.getByRole('link', { name: 'Overview' })).toHaveAttribute('aria-current', 'page')
@@ -71,5 +81,6 @@ describe('Project workspace', () => {
     expect(await screen.findByRole('heading', { name: heading, level: 1 })).toBeVisible()
     const nav = within(screen.getByRole('navigation', { name: 'Project navigation' }))
     expect(nav.getByRole('link', { name: section })).toHaveAttribute('aria-current', 'page')
+    expectActiveGlobalLink('Projects')
   })
 })

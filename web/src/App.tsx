@@ -4,16 +4,13 @@ import { Link, NavLink, Outlet, RouterProvider, useMatch } from 'react-router-do
 import type { RouterProviderProps } from 'react-router-dom'
 import { LensMark } from '@/components/brand/LensMark'
 import { ConnectionProvider, useConnection } from '@/api/ConnectionProvider'
-import { MockConsoleProvider } from '@/mocks/MockConsoleProvider'
 
 export function App({ router }: Pick<RouterProviderProps, 'router'>) {
   const [queryClient] = useState(() => new QueryClient({ defaultOptions: { queries: { retry: false } } }))
   return (
     <QueryClientProvider client={queryClient}>
       <ConnectionProvider>
-        <MockConsoleProvider>
-          <RouterProvider router={router} />
-        </MockConsoleProvider>
+        <RouterProvider router={router} />
       </ConnectionProvider>
     </QueryClientProvider>
   )

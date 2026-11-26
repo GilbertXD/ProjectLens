@@ -12,7 +12,6 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Input } from '@/components/ui/Input'
 import { Select } from '@/components/ui/Select'
 import { Textarea } from '@/components/ui/Textarea'
-import { useMockConsole } from '@/mocks/MockConsoleProvider'
 import type { Repository, SyncPolicy } from '@/types/domain'
 
 function PolicyForm({ repo, kind, policy }: { repo: Repository; kind: SyncPolicy['kind']; policy?: SyncPolicy }) {
@@ -40,7 +39,6 @@ function PolicyForm({ repo, kind, policy }: { repo: Repository; kind: SyncPolicy
 
 export function RepositorySettings({ repo }: { repo: Repository }) {
   const navigate = useNavigate()
-  const { disassociateRepository } = useMockConsole()
   const policies = usePolicies(repo.project_id, repo.id)
   const { save, refresh, remove } = useRepositorySettings(repo.project_id, repo.id)
   const [notice, setNotice] = useState('')
@@ -89,6 +87,9 @@ export function RepositorySettings({ repo }: { repo: Repository }) {
     </SectionRule>
     <SectionRule title="Sync policies">
       <ApiContent query={policies} loading="Loading sync policies…">
+        {policies.data?.items.length === 0 && <p className="rule-message">
+          No sync policies are configured. Enable a policy below and save it to schedule automatic syncs.
+        </p>}
         {kinds.map((kind) => <PolicyForm key={kind} repo={repo} kind={kind}
           policy={policies.data?.items.find((policy) => policy.kind === kind)} />)}
       </ApiContent>
@@ -109,11 +110,7 @@ export function RepositorySettings({ repo }: { repo: Repository }) {
       </>}
       confirmLabel="Disassociate repository" pending={remove.isPending}
       onCancel={() => { if (!remove.isPending) { setDeleting(false); remove.reset() } }} onConfirm={() => {
-        remove.mutate(undefined, { onSuccess: () => {
-          // Keep the provisional Documents view consistent until it is migrated.
-          disassociateRepository(repo)
-          void navigate(projectPath(repo.project_id) + '/repositories')
-        } })
+        remove.mutate(undefined, { onSuccess: () => { void navigate(projectPath(repo.project_id) + '/repositories') } })
       }} />
   </>
 }

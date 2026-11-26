@@ -2,6 +2,10 @@
 
 ProjectLens is a Go 1.25 HTTP service built with Gin.
 
+## Web Console
+
+Use the web console to manage projects and repositories, browse indexed code, search, edit Markdown documents, and track jobs. The [web console guide](web/README.md) covers local setup, the Vite proxy, authentication, and build and test commands. See the [design system](docs/WEB_DESIGN_SYSTEM.md) and [API mapping](docs/WEB_API_MAPPING.md) for interface and integration details.
+
 ## Quickstart with Docker Compose
 
 From a clean checkout with Docker and the Compose plugin, start the API, PostgreSQL, Redis, and the embedded worker. Compose accepts shell overrides and works without an environment file.

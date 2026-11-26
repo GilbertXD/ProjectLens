@@ -1,5 +1,11 @@
-import type { Repository, SearchHit, SearchResult, SearchSourceType } from '@/types/domain'
-import type { ConsoleData } from './MockConsoleProvider'
+import type { Document, Repository, SearchHit, SearchResult, SearchSourceType } from '@/types/domain'
+import type { RepositoryPreview } from './fixtures'
+
+type SearchData = {
+  repositories: RepositoryPreview[]
+  documents: Document[]
+  searchVersion: number
+}
 
 export type ScopeFilters =
   | { scope: 'project' | 'all' }
@@ -16,7 +22,7 @@ function escapeSnippet(text: string) {
   return text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
 }
 
-export function mockSearch(data: ConsoleData, projectId: string, filters: SearchFilters, offset: number, limit: number,
+export function mockSearch(data: SearchData, projectId: string, filters: SearchFilters, offset: number, limit: number,
   cacheStatus: SearchResult['cache_status']): SearchResult {
   const matcher = new RegExp(filters.q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
   const matches: SearchHit[] = []
