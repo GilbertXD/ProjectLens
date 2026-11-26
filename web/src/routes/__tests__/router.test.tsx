@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { createMemoryRouter } from 'react-router-dom'
 import { describe, expect, it } from 'vitest'
 import { App } from '@/App'
+import { fixtureIds, repositoryPreviews } from '@/mocks/fixtures'
 import { routes } from '../router'
 
 function renderConsole(path: string) {
@@ -37,28 +38,33 @@ describe('Global navigation', () => {
 describe('Project workspace', () => {
   it('opens Overview at the project root and keeps both navigation levels visible', async () => {
     const user = userEvent.setup()
-    const router = renderConsole('/projects/project-1')
+    const router = renderConsole('/projects/' + fixtureIds.core)
     expect(await screen.findByRole('heading', { name: 'Overview' })).toBeVisible()
-    expect(router.state.location.pathname).toBe('/projects/project-1/overview')
+    expect(router.state.location.pathname).toBe('/projects/' + fixtureIds.core + '/overview')
     expect(screen.getByRole('navigation', { name: 'Global navigation' })).toBeVisible()
 
     const nav = within(screen.getByRole('navigation', { name: 'Project navigation' }))
     expect(nav.getByRole('link', { name: 'Overview' })).toHaveAttribute('aria-current', 'page')
     await user.click(nav.getByRole('link', { name: 'Search' }))
     expect(screen.getByRole('heading', { name: 'Search' })).toBeVisible()
-    expect(router.state.location.pathname).toBe('/projects/project-1/search')
+    expect(router.state.location.pathname).toBe('/projects/' + fixtureIds.core + '/search')
   })
 
   it.each([
     ['repositories', 'Repositories', 'Repositories'],
-    ['repositories/repo-1', 'Repository', 'Repositories'],
-    ['repositories/repo-1/commits/123', 'Repository', 'Repositories'],
+    ['repositories/' + fixtureIds.api, 'projectlens-api', 'Repositories'],
+    ['repositories/' + fixtureIds.api + '/files', 'projectlens-api', 'Repositories'],
+    ['repositories/' + fixtureIds.api + '/commits', 'projectlens-api', 'Repositories'],
+    ['repositories/' + fixtureIds.api + '/commits/' + repositoryPreviews[0].history!.items[0].hash, 'projectlens-api', 'Repositories'],
+    ['repositories/' + fixtureIds.api + '/snapshots', 'projectlens-api', 'Repositories'],
+    ['repositories/' + fixtureIds.api + '/settings', 'projectlens-api', 'Repositories'],
+    ['search', 'Search', 'Search'],
     ['documents', 'Documents', 'Documents'],
-    ['documents/doc-1', 'Document', 'Documents'],
+    ['documents/' + fixtureIds.migration, 'Indexer migration notes', 'Documents'],
     ['activity', 'Activity', 'Activity'],
-  ])('renders %s with its project section selected', (path, heading, section) => {
-    renderConsole(`/projects/project-1/${path}`)
-    expect(screen.getByRole('heading', { name: heading })).toBeVisible()
+  ])('renders %s with its project section selected', async (path, heading, section) => {
+    renderConsole(`/projects/${fixtureIds.core}/${path}`)
+    expect(await screen.findByRole('heading', { name: heading, level: 1 })).toBeVisible()
     const nav = within(screen.getByRole('navigation', { name: 'Project navigation' }))
     expect(nav.getByRole('link', { name: section })).toHaveAttribute('aria-current', 'page')
   })

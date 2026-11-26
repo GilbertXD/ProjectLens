@@ -2,13 +2,16 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Link, NavLink, Outlet, RouterProvider, useMatch } from 'react-router-dom'
 import type { RouterProviderProps } from 'react-router-dom'
 import { LensMark } from '@/components/brand/LensMark'
+import { MockConsoleProvider } from '@/mocks/MockConsoleProvider'
 
 const queryClient = new QueryClient()
 
 export function App({ router }: Pick<RouterProviderProps, 'router'>) {
   return (
     <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
+      <MockConsoleProvider>
+        <RouterProvider router={router} />
+      </MockConsoleProvider>
     </QueryClientProvider>
   )
 }

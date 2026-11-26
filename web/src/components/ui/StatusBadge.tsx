@@ -7,6 +7,7 @@ const statuses: Record<string, { label: string; tone: Tone }> = {
   failed: { label: 'Failed', tone: 'error' },
   cancelled: { label: 'Cancelled', tone: 'neutral' },
   active: { label: 'Active', tone: 'neutral' },
+  archived: { label: 'Archived', tone: 'neutral' },
   staging: { label: 'Staging', tone: 'warning' },
   superseded: { label: 'Superseded', tone: 'neutral' },
   ok: { label: 'Healthy', tone: 'healthy' },

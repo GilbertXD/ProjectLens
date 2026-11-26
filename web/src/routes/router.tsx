@@ -1,76 +1,65 @@
+import { lazy, Suspense } from 'react'
 import { Link, Navigate, NavLink, Outlet, useParams } from 'react-router-dom'
 import type { RouteObject } from 'react-router-dom'
 import { ConsoleLayout } from '@/App'
-import { LensMark } from '@/components/brand/LensMark'
+import { PageHeading } from '@/components/shared/SectionRule'
+import { StatusBadge } from '@/components/ui/StatusBadge'
+import { useMockConsole } from '@/mocks/MockConsoleProvider'
+import { JobsPage } from '@/pages/global/JobsPage'
+import { ProjectsPage } from '@/pages/global/ProjectsPage'
+import { SettingsPage } from '@/pages/global/SettingsPage'
+import { DocumentsPage } from '@/pages/project/DocumentsPage'
+import { OverviewPage } from '@/pages/project/OverviewPage'
+import { RepositoriesPage } from '@/pages/project/RepositoriesPage'
+import { RepositoryDetailPage } from '@/pages/project/RepositoryDetailPage'
+import { SearchPage } from '@/pages/project/SearchPage'
+
+const ActivityPage = lazy(() => import('@/pages/project/ActivityPage').then(({ ActivityPage }) => ({ default: ActivityPage })))
+const DocumentDetailPage = lazy(() => import('@/pages/project/DocumentDetailPage')
+  .then(({ DocumentDetailPage }) => ({ default: DocumentDetailPage })))
 
 const workspaceSections = [
-  { path: 'overview', title: 'Overview', description: 'Review project details, repositories, documents, and sync jobs.' },
-  { path: 'repositories', title: 'Repositories', description: 'Manage repository associations and inspect files and Git history.' },
-  { path: 'search', title: 'Search', description: 'Find code and documents within a selected scope.' },
-  { path: 'documents', title: 'Documents', description: 'Read and manage project and repository Markdown documents.' },
-  { path: 'activity', title: 'Activity', description: 'Browse commits, issues, and pull requests from project repositories.' },
+  { path: 'overview', title: 'Overview', element: <OverviewPage /> },
+  { path: 'repositories', title: 'Repositories', element: <RepositoriesPage /> },
+  { path: 'search', title: 'Search', element: <SearchPage /> },
+  { path: 'documents', title: 'Documents', element: <DocumentsPage /> },
+  { path: 'activity', title: 'Activity', element: <ActivityPage /> },
 ]
-
-function GlobalHome() {
-  return (
-    <main id="main-content" tabIndex={-1} className="home-container global-home">
-      <header className="home-heading">
-        <div>
-          <h1>Projects</h1>
-          <p>See beyond the code.</p>
-        </div>
-        <LensMark className="home-heading__mark" />
-      </header>
-      <div className="home-intro">
-        <p>Organize repositories and documentation by project.</p>
-      </div>
-    </main>
-  )
-}
-
-function PageHeading({ title, description }: { title: string; description: string }) {
-  return (
-    <header className="page-heading">
-      <h1>{title}</h1>
-      <p>{description}</p>
-    </header>
-  )
-}
-
-function GlobalPage({ title, description }: { title: string; description: string }) {
-  return (
-    <main id="main-content" tabIndex={-1} className="home-container global-page">
-      <PageHeading title={title} description={description} />
-    </main>
-  )
-}
 
 function ProjectLayout() {
   const { projectId } = useParams()
+  const { projects } = useMockConsole()
+  const project = projects.find(({ id }) => id === projectId)
+
+  if (!project) return <MissingPage title="Project not found" />
 
   return (
     <div className="workspace">
       <aside className="workspace-rail">
         <Link className="workspace-rail__back" to="/">All projects</Link>
-        <p className="workspace-rail__id"><code>{projectId}</code></p>
+        <div className="workspace-rail__project">
+          <strong>{project.name}</strong><code>{project.slug}</code>
+          <StatusBadge status={project.status} />
+        </div>
         <nav className="workspace-nav" aria-label="Project navigation">
-          {workspaceSections.map(({ path, title }) => (
-            <NavLink key={path} to={path}>{title}</NavLink>
-          ))}
+          {workspaceSections.map(({ path, title }) => <NavLink key={path} to={path}>{title}</NavLink>)}
         </nav>
+        <p className="workspace-rail__preview">Preview data</p>
       </aside>
-      <main id="main-content" tabIndex={-1} className="workspace-main">
-        <Outlet />
+      <main id="main-content" tabIndex={-1} className="workspace-main" key={project.id}>
+        <Suspense fallback={<p className="rule-message" role="status">Loading workspace view…</p>}>
+          <Outlet context={project} />
+        </Suspense>
       </main>
     </div>
   )
 }
 
-function NotFound() {
+function MissingPage({ title = 'Page not found' }: { title?: string }) {
   return (
     <main id="main-content" tabIndex={-1} className="home-container global-page">
-      <PageHeading title="Page not found" description="Check the address or return to Projects." />
-      <Link to="/">Return to Projects</Link>
+      <PageHeading title={title} description="Check the address or return to Projects." />
+      <Link className="text-link" to="/">Return to Projects</Link>
     </main>
   )
 }
@@ -79,29 +68,21 @@ export const routes: RouteObject[] = [
   {
     element: <ConsoleLayout />,
     children: [
-      { index: true, element: <GlobalHome /> },
-      { path: 'jobs', element: <GlobalPage title="Jobs" description="Inspect sync jobs and check their progress." /> },
-      { path: 'settings', element: <GlobalPage title="Settings" description="Manage the API connection and check service health." /> },
+      { index: true, element: <ProjectsPage /> },
+      { path: 'jobs', element: <JobsPage /> },
+      { path: 'settings', element: <SettingsPage /> },
       {
         path: 'projects/:projectId',
         element: <ProjectLayout />,
         children: [
           { index: true, element: <Navigate to="overview" replace /> },
-          ...workspaceSections.map(({ path, title, description }) => ({
-            path,
-            element: <PageHeading title={title} description={description} />,
-          })),
-          {
-            path: 'repositories/:repoId/*',
-            element: <PageHeading title="Repository" description="Inspect snapshots, files, and Git history for this repository." />,
-          },
-          {
-            path: 'documents/:docId',
-            element: <PageHeading title="Document" description="Read or edit this Markdown document." />,
-          },
+          ...workspaceSections.map(({ path, element }) => ({ path, element })),
+          { path: 'repositories/:repoId/*', element: <RepositoryDetailPage /> },
+          { path: 'documents/:docId', element: <DocumentDetailPage /> },
+          { path: '*', element: <PageHeading title="Workspace page not found" description="Choose a section in the project navigation." /> },
         ],
       },
-      { path: '*', element: <NotFound /> },
+      { path: '*', element: <MissingPage /> },
     ],
   },
 ]
