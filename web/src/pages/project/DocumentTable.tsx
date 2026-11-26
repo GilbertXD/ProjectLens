@@ -4,7 +4,9 @@ import { documentPath, formatDate } from '@/components/shared/format'
 import type { DocumentSummary, Repository } from '@/types/domain'
 
 export function DocumentOriginTag({ document }: { document: DocumentSummary }) {
-  return document.origin && <span className="provenance">Origin: {document.origin.repository_name}</span>
+  return document.scope === 'project' && document.origin
+    ? <span className="provenance">Origin: {document.origin.repository_name}</span>
+    : null
 }
 
 export function DocumentTable({ documents, repositories }: { documents: DocumentSummary[]; repositories: Repository[] }) {
@@ -13,7 +15,7 @@ export function DocumentTable({ documents, repositories }: { documents: Document
     empty="No documents in this view. Create a document to add Markdown knowledge."
     rows={documents.map((doc) => ({ key: doc.id, cells: [
       <Link className="text-link" to={documentPath(doc.project_id, doc.id)}>{doc.title}</Link>,
-      doc.repository_id ? `Repository / ${names.get(doc.repository_id) ?? 'Unknown repository'}` : 'Project',
-      doc.origin ? <DocumentOriginTag document={doc} /> : '—', 'v' + doc.version, formatDate(doc.updated_at),
+      doc.scope === 'repository' ? `Repository / ${names.get(doc.repository_id ?? '') ?? 'Unknown repository'}` : 'Project',
+      doc.scope === 'project' && doc.origin ? <DocumentOriginTag document={doc} /> : '—', 'v' + doc.version, formatDate(doc.updated_at),
     ] }))} />
 }

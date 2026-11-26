@@ -1,9 +1,10 @@
 import { ApiError, apiFetch, apiFetchWithMeta } from './client'
 import type { ApiConnection } from './connection'
 import type {
-  BlameLine, CommitComparison, CommitHistoryEntry, CommitHistoryPage, DocumentSummary, FileChange,
+  BlameLine, CommitComparison, CommitHistoryEntry, CommitHistoryPage, Document, DocumentSummary, FileChange,
   FileHistoryEntry, GitHubActivity, GitRef, Health, Job, JobStatus, KnowledgeScope, Project,
-  ProjectStatus, Readiness, Repository, RepositoryRole, RepositorySourceType, Snapshot,
+  ProjectStatus, Readiness, Repository, RepositoryRole, RepositorySourceType, SearchCacheStatus, SearchResult,
+  SearchScope, SearchSourceType, Snapshot,
   SourceFile, SyncPolicy,
 } from '@/types/domain'
 
@@ -19,6 +20,23 @@ export interface ProjectFilters extends PageParams { status?: ProjectStatus }
 export interface RepositoryFilters extends PageParams { role?: RepositoryRole; source_type?: RepositorySourceType }
 export interface JobFilters extends PageParams { status?: JobStatus; type?: string }
 export interface DocumentFilters extends PageParams { scope?: KnowledgeScope; repository_id?: string }
+export interface RepositorySearchFilters extends PageParams {
+  q: string
+  source_type?: SearchSourceType[]
+  path_prefix?: string
+}
+export interface SearchFilters extends RepositorySearchFilters {
+  scope: SearchScope
+  repository_id?: string
+  repository_ids?: string[]
+  repository_role?: RepositoryRole
+  include_project_documents?: boolean
+}
+export type DocumentInput = Pick<Document, 'title'> & Partial<Pick<Document, 'content'>> & { repository_id?: string | null }
+export type DocumentPatch = Partial<Pick<Document, 'title' | 'content'>>
+export type DocumentReplacement = Omit<DocumentInput, 'repository_id'>
+export type DocumentRecord = Document & { etag?: string }
+export const documentMaxBytes = 1_048_576
 export interface TreeFilters extends PageParams { path_prefix?: string }
 export interface ActiveFileFilters extends TreeFilters { q?: string }
 export interface RefFilters extends PageParams { type?: GitRef['type'] }
@@ -79,6 +97,8 @@ const projectPath = (id: string) => projectsPath + '/' + encodeURIComponent(id)
 const repositoriesPath = (id: string) => projectPath(id) + '/repositories'
 const repositoryPath = (id: string, repoId: string) => repositoriesPath(id) + '/' + encodeURIComponent(repoId)
 const jobPath = (id: string) => jobsPath + '/' + encodeURIComponent(id)
+const documentsPath = (id: string) => projectPath(id) + '/documents'
+const documentPath = (id: string, docId: string) => documentsPath(id) + '/' + encodeURIComponent(docId)
 
 function params(path: string, filters: object) {
   const query = new URLSearchParams()
@@ -219,8 +239,80 @@ export const listPullComments = (api: ApiConnection, id: string, repoId: string,
 export const listPullCommits = (api: ApiConnection, id: string, repoId: string, number: number, filters: PageParams = {}, signal?: AbortSignal) =>
   activityPage(api, repositoryPath(id, repoId) + '/pulls/' + number + '/commits', filters, signal)
 
+export const searchScopes: readonly SearchScope[] = ['project', 'repository', 'cross_repository', 'all']
+
+function searchParams({ q, source_type, path_prefix, limit, offset }: RepositorySearchFilters) {
+  return { q: q.trim(), source_type: source_type?.join(','), path_prefix: path_prefix?.trim(), limit, offset }
+}
+
+export function projectSearchParams(filters: SearchFilters) {
+  const { scope, repository_id, repository_ids, repository_role, include_project_documents } = filters
+  return {
+    ...searchParams(filters),
+    scope,
+    ...(scope === 'project' && { path_prefix: undefined }),
+    ...(scope === 'repository' && { repository_id }),
+    ...(scope === 'cross_repository' && {
+      repository_ids: repository_ids?.join(','),
+      repository_role,
+      include_project_documents: include_project_documents === true ? true : undefined,
+    }),
+  }
+}
+
+const cacheStatuses: readonly string[] = ['hit', 'miss', 'bypass', 'degraded']
+
+async function search(api: ApiConnection, path: string, filters: { q: string }, signal?: AbortSignal): Promise<SearchResult> {
+  if (!filters.q) throw new Error('Enter a search query.')
+  const { data, searchCache, searchVersion } = await apiFetchWithMeta<SearchResult>(api, params(path, filters), { signal })
+  return {
+    ...data,
+    cache_status: searchCache && cacheStatuses.includes(searchCache) ? searchCache as SearchCacheStatus : data.cache_status,
+    search_version: searchVersion && /^\d+$/.test(searchVersion) ? Number(searchVersion) : data.search_version,
+  }
+}
+
+export async function searchProject(api: ApiConnection, id: string, filters: SearchFilters, signal?: AbortSignal) {
+  if (!searchScopes.includes(filters.scope)) throw new Error('Choose a search scope.')
+  if (filters.scope === 'repository' && !filters.repository_id) throw new Error('Choose a repository.')
+  return search(api, projectPath(id) + '/search', projectSearchParams(filters), signal)
+}
+
+export const searchRepository = (api: ApiConnection, id: string, repoId: string, filters: RepositorySearchFilters, signal?: AbortSignal) =>
+  search(api, repositoryPath(id, repoId) + '/search', searchParams(filters), signal)
+
 export const listDocuments = (api: ApiConnection, id: string, filters: DocumentFilters = {}, signal?: AbortSignal) =>
-  apiFetch<Page<DocumentSummary>>(api, params(projectPath(id) + '/documents', filters), { signal })
+  apiFetch<Page<DocumentSummary>>(api, params(documentsPath(id), {
+    ...filters, repository_id: filters.scope === 'project' ? undefined : filters.repository_id,
+  }), { signal })
+
+async function fetchDocument(api: ApiConnection, path: string, options?: RequestInit): Promise<DocumentRecord> {
+  const { data, etag } = await apiFetchWithMeta<Document>(api, path, options)
+  return { ...data, etag }
+}
+
+export const getDocument = (api: ApiConnection, id: string, docId: string, signal?: AbortSignal) =>
+  fetchDocument(api, documentPath(id, docId), { signal })
+
+export function createDocument(api: ApiConnection, id: string, { title, content, repository_id }: DocumentInput) {
+  const path = repository_id ? repositoryPath(id, repository_id) + '/documents' : documentsPath(id)
+  return fetchDocument(api, path, json('POST', { title, content, repository_id: repository_id || undefined }))
+}
+
+const ifMatch = (version: number) => ({ 'If-Match': '"' + version + '"' })
+
+function writeDocument(api: ApiConnection, id: string, docId: string, method: 'PATCH' | 'PUT',
+  { title, content }: DocumentPatch, version: number) {
+  const request = json(method, { title, content, version })
+  return fetchDocument(api, documentPath(id, docId), { ...request, headers: { ...request.headers, ...ifMatch(version) } })
+}
+
+export const patchDocument = (api: ApiConnection, id: string, docId: string, input: DocumentPatch, version: number) =>
+  writeDocument(api, id, docId, 'PATCH', input, version)
+export const replaceDocument = (api: ApiConnection, id: string, docId: string, input: DocumentReplacement, version: number) =>
+  writeDocument(api, id, docId, 'PUT', input, version)
+export const deleteDocument = (api: ApiConnection, id: string, docId: string, version?: number) =>
+  apiFetch<void>(api, documentPath(id, docId), { method: 'DELETE', headers: version === undefined ? undefined : ifMatch(version) })
 
 export const listJobs = (api: ApiConnection, filters: JobFilters = {}, signal?: AbortSignal) =>
   apiFetch<Page<Job>>(api, params(jobsPath, filters), { signal })

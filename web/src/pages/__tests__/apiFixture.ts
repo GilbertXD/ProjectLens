@@ -1,16 +1,20 @@
 import { vi } from 'vitest'
 import { documents, emptyRepository, fixtureIds, health, jobs, makeJob, projects, publishSnapshot, repositoryPreviews } from '@/mocks/fixtures'
-import type { Job, Project, Repository } from '@/types/domain'
+import { mockSearch, type ScopeFilters } from '@/mocks/search'
+import type { Document, Job, Project, Repository, SearchSourceType } from '@/types/domain'
 
 export const json = (body: unknown, status = 200, headers?: HeadersInit) => Response.json(body, { status, headers })
 export const problem = (status: number, code: string, error: string, headers?: HeadersInit) => json({ error, code }, status, headers)
 
 export function mockApi(
   override?: (url: URL, method: string, init?: RequestInit) => Response | undefined,
-  { additionalIssues = 0 } = {},
+  { additionalIssues = 0, conflictOn }: { additionalIssues?: number; conflictOn?: 'PATCH' | 'DELETE' } = {},
 ) {
   let projectList = structuredClone(projects)
   let repos = structuredClone(repositoryPreviews)
+  let documentList = structuredClone(documents)
+  let searchVersion = 1
+  const searched = new Set<string>()
   const github = repos.find(({ repository }) => repository.id === fixtureIds.gin)!
   const issue = github.activity.find(({ item }) => item.kind === 'issue')!.item
   github.activity.push(...Array.from({ length: additionalIssues }, (_, index) => ({
@@ -82,7 +86,87 @@ export function mockApi(
         return new Response(null, { status: 204 })
       }
       if (project && !group) return json(project)
-      if (project && group === 'documents') return page(documents.filter((doc) => doc.project_id === id))
+      const repoRoute = group === 'repositories'
+      const repository = repoRoute ? repos.find(({ repository }) => repository.project_id === id && repository.id === repoId)?.repository : undefined
+      if (project && (group === 'documents' || repository && tail[0] === 'documents')) {
+        const documentId = repoRoute ? tail[1] : repoId
+        const matches = documentList.filter((doc) => doc.project_id === id && (!repository || doc.repository_id === repository.id))
+        let doc = matches.find((item) => item.id === documentId)
+        const documentResponse = (item: Document, status = 200) => json(item, status, { ETag: '"' + item.version + '"' })
+        if (!documentId && method === 'GET') {
+          return page(matches.filter((item) => included('scope', item.scope) && included('repository_id', item.repository_id ?? ''))
+            .map(({ content: _content, ...summary }) => summary))
+        }
+        if ('origin' in body) return problem(400, 'invalid_input', 'origin is read-only')
+        if (!documentId && method === 'POST') {
+          if (repository && body.repository_id !== repository.id) {
+            return problem(400, 'invalid_input', 'repository_id must match the path')
+          }
+          const content: string = body.content ?? ''
+          const created: Document = { id: crypto.randomUUID(), project_id: id, repository_id: repository?.id,
+            scope: repository ? 'repository' : 'project', title: body.title, content, content_bytes: new TextEncoder().encode(content).length,
+            version: 1, created_at: time, updated_at: time }
+          documentList = [created, ...documentList]
+          searchVersion++
+          return documentResponse(created, 201)
+        }
+        if (!doc) return problem(404, 'not_found', 'document not found')
+        if (method === 'GET') return documentResponse(doc)
+        if (method === conflictOn) {
+          conflictOn = undefined
+          const content = 'Changes from another **editor**.'
+          const latest = { ...doc, title: doc.title + ' (server)', content, version: doc.version + 1,
+            content_bytes: new TextEncoder().encode(content).length, updated_at: time }
+          documentList = documentList.map((item) => item === doc ? latest : item)
+          doc = latest
+          searchVersion++
+        }
+        const header = new Headers(init?.headers).get('If-Match')
+        const expected = '"' + doc.version + '"'
+        if (method === 'DELETE' ? header !== null && header !== expected : header !== expected || body.version !== doc.version) {
+          return problem(409, 'version_conflict', 'document version changed')
+        }
+        if (method === 'DELETE') {
+          documentList = documentList.filter((item) => item !== doc)
+          searchVersion++
+          return new Response(null, { status: 204 })
+        }
+        if (method === 'PATCH' || method === 'PUT') {
+          const content = body.content ?? (method === 'PUT' ? '' : doc.content)
+          const updated = { ...doc, title: body.title ?? doc.title, content, version: doc.version + 1,
+            content_bytes: new TextEncoder().encode(content).length, updated_at: time }
+          documentList = documentList.map((item) => item === doc ? updated : item)
+          searchVersion++
+          return documentResponse(updated)
+        }
+      }
+      if (project && (group === 'search' || repository && suffix === 'search')) {
+        const scope = repository ? 'repository' : searchParams.get('scope')
+        const q = searchParams.get('q')?.trim()
+        const repository_id = repository?.id ?? searchParams.get('repository_id')
+        const forbidden = scope === 'cross_repository' ? ['repository_id'] : [
+          'repository_ids', 'repository_role', 'include_project_documents',
+          ...(scope !== 'repository' ? ['repository_id'] : []), ...(scope === 'project' ? ['path_prefix'] : []),
+        ]
+        if (!q || forbidden.some((key) => searchParams.has(key))) return problem(400, 'invalid_input', 'invalid search filters')
+        const values = (name: string) => searchParams.getAll(name).flatMap((value) => value.split(','))
+        let ownership: ScopeFilters
+        if (scope === 'repository' && repository_id) ownership = { scope, repository_id }
+        else if (scope === 'cross_repository') {
+          const role = searchParams.get('repository_role')
+          ownership = { scope, repository_ids: values('repository_ids'),
+            repository_role: role === 'primary' || role === 'reference' ? role : undefined,
+            include_project_documents: searchParams.get('include_project_documents') === 'true' || undefined }
+        } else if (scope === 'project' || scope === 'all') ownership = { scope }
+        else return problem(400, 'invalid_input', 'search scope is required')
+        const searchKey = searchVersion + ':' + pathname + url.search
+        const cache = searched.has(searchKey) ? 'hit' : 'miss'
+        searched.add(searchKey)
+        return json(mockSearch({ projects: projectList, repositories: repos, documents: documentList, jobs: jobList, searchVersion },
+          id, { ...ownership, q, source_type: values('source_type') as SearchSourceType[],
+            path_prefix: searchParams.get('path_prefix') ?? '' }, offset, limit, cache), 200,
+        { 'X-Search-Cache': cache, 'X-Search-Version': String(searchVersion) })
+      }
       const threads = repos.filter(({ repository }) => repository.project_id === id)
         .flatMap(({ activity }) => activity)
       const discussionKind = (resource: string) => resource === 'issues' ? 'issue' : 'pull_request'
@@ -107,6 +191,12 @@ export function mockApi(
           if (!suffix && method === 'GET') return json(preview.repository)
           if (!suffix && method === 'DELETE') {
             repos = repos.filter((entry) => entry !== preview)
+            documentList = documentList.map((doc) => doc.repository_id === repoId ? {
+              ...doc, scope: 'project', repository_id: undefined,
+              origin: { repository_id: repoId, repository_name: preview.repository.name },
+              version: doc.version + 1, updated_at: time,
+            } : doc)
+            searchVersion++
             return new Response(null, { status: 204 })
           }
           if ((!suffix && method === 'PATCH') || suffix === 'refresh-metadata') {

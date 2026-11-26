@@ -1,4 +1,4 @@
-import { queryOptions, useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
+import { queryOptions, skipToken, useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiError } from './client'
 import { useConnection } from './ConnectionProvider'
 import type { ApiConnection } from './connection'
@@ -10,6 +10,9 @@ const projectsKey = (api: ApiConnection) => [...key(api), 'projects'] as const
 const projectKey = (api: ApiConnection, id: string) => [...key(api), 'project', id] as const
 const repositoriesKey = (api: ApiConnection, id: string) => [...projectKey(api, id), 'repositories'] as const
 const repositoryKey = (api: ApiConnection, id: string, repoId: string) => [...projectKey(api, id), 'repository', repoId] as const
+const documentsKey = (api: ApiConnection, id: string) => [...projectKey(api, id), 'documents'] as const
+const documentKey = (api: ApiConnection, id: string) => [...projectKey(api, id), 'document'] as const
+const searchKey = (api: ApiConnection, id: string) => [...projectKey(api, id), 'search'] as const
 const policiesKey = (api: ApiConnection, id: string, repoId: string) => [...repositoryKey(api, id, repoId), 'policies'] as const
 const jobsKey = (api: ApiConnection) => [...key(api), 'jobs'] as const
 const recentJobsKey = (api: ApiConnection) => [...jobsKey(api), 'recent-project'] as const
@@ -154,7 +157,7 @@ export function useRepositorySettings(id: string, repoId: string) {
       // Remove cached detail and child queries for the deleted association.
       client.removeQueries({ queryKey })
       await Promise.all([
-        repositoriesKey(api, id), [...projectKey(api, id), 'documents'], jobsKey(api),
+        repositoriesKey(api, id), documentsKey(api, id), documentKey(api, id), searchKey(api, id), jobsKey(api),
       ].map((key) => client.invalidateQueries({ queryKey: key })))
     },
   })
@@ -332,8 +335,72 @@ export function usePullCommits(id: string, repoId: string, number: number, filte
 export function useDocuments(id: string, filters: endpoints.DocumentFilters) {
   const { connection: api } = useConnection()
   return useQuery({
-    queryKey: [...projectKey(api, id), 'documents', filters],
+    queryKey: [...documentsKey(api, id), filters],
     queryFn: ({ signal }) => endpoints.listDocuments(api, id, filters, signal),
+  })
+}
+
+export function useProjectSearch(id: string, filters?: endpoints.SearchFilters) {
+  const { connection: api } = useConnection()
+  return useQuery({
+    queryKey: [...searchKey(api, id), filters && endpoints.projectSearchParams(filters)],
+    queryFn: filters ? ({ signal }) => endpoints.searchProject(api, id, filters, signal) : skipToken,
+  })
+}
+
+export function useDocument(id: string, docId: string) {
+  const { connection: api } = useConnection()
+  return useQuery({
+    queryKey: [...documentKey(api, id), docId],
+    queryFn: docId ? ({ signal }) => endpoints.getDocument(api, id, docId, signal) : skipToken,
+  })
+}
+
+function useDocumentCache(id: string) {
+  const { connection: api } = useConnection()
+  const client = useQueryClient()
+  const refreshCollections = () => Promise.all([
+    // Overview uses a bounded page of the same document collection.
+    client.invalidateQueries({ queryKey: documentsKey(api, id) }),
+    client.invalidateQueries({ queryKey: searchKey(api, id) }),
+  ])
+  return {
+    api,
+    async save(document: endpoints.DocumentRecord) {
+      const queryKey = [...documentKey(api, id), document.id]
+      await client.cancelQueries({ queryKey, exact: true })
+      client.setQueryData(queryKey, document)
+      await refreshCollections()
+    },
+    async remove(docId: string) {
+      client.removeQueries({ queryKey: [...documentKey(api, id), docId], exact: true })
+      await refreshCollections()
+    },
+  }
+}
+
+export function useCreateDocument(id: string) {
+  const cache = useDocumentCache(id)
+  return useMutation({
+    mutationFn: (input: endpoints.DocumentInput) => endpoints.createDocument(cache.api, id, input),
+    onSuccess: cache.save,
+  })
+}
+
+export function useUpdateDocument(id: string, docId: string) {
+  const cache = useDocumentCache(id)
+  return useMutation({
+    mutationFn: ({ input, version }: { input: endpoints.DocumentPatch; version: number }) =>
+      endpoints.patchDocument(cache.api, id, docId, input, version),
+    onSuccess: cache.save,
+  })
+}
+
+export function useDeleteDocument(id: string, docId: string) {
+  const cache = useDocumentCache(id)
+  return useMutation({
+    mutationFn: (version?: number) => endpoints.deleteDocument(cache.api, id, docId, version),
+    onSuccess: () => cache.remove(docId),
   })
 }
 
@@ -408,6 +475,9 @@ export function useEnqueueSync(id: string, repoId: string, kind: SyncPolicy['kin
     void client.invalidateQueries({ queryKey: recentJobsKey(api) })
     if (kind === 'github_activity' && job?.status === 'succeeded') {
       void client.invalidateQueries({ queryKey: activityKey(api, id) })
+    }
+    if (kind === 'files' && job?.status === 'succeeded') {
+      void client.invalidateQueries({ queryKey: searchKey(api, id) })
     }
   }
   return { mutation, receipt: mutation.data, refreshOnSettled }
