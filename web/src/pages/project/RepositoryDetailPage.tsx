@@ -9,8 +9,6 @@ import { ApiContent } from '@/api/ApiFeedback'
 import { useRepository, useSnapshots } from '@/api/queries'
 import { useRepositorySync } from '@/api/RepositorySyncAction'
 import { Pagination } from '@/components/ui/Pagination'
-import { emptyRepository } from '@/mocks/fixtures'
-import { useMockConsole } from '@/mocks/MockConsoleProvider'
 import type { Repository } from '@/types/domain'
 import { RepositoryCommits } from './RepositoryCommits'
 import { RepositoryFiles } from './RepositoryFiles'
@@ -53,7 +51,6 @@ export function RepositoryDetailPage() {
   const project = useProject()
   const { repoId, '*': rest } = useParams()
   const { search, hash: fragment } = useLocation()
-  const store = useMockConsole()
   const query = useRepository(project.id, repoId ?? '')
   const back = projectPath(project.id) + '/repositories'
   const repo = query.data
@@ -62,8 +59,6 @@ export function RepositoryDetailPage() {
     <Link className="text-link" to={back}>All repositories</Link>
   </>
 
-  const fixture = store.repositories.find(({ repository }) => repository.project_id === project.id && repository.id === repo.id)
-  const preview = fixture ? { ...fixture, repository: repo } : emptyRepository(repo)
   const base = repositoryPath(project.id, repo.id)
   const [tab, hash, extra] = (rest ?? '').split('/')
   if (!tab) return <Navigate to={{ pathname: base + '/files', search, hash: fragment }} replace />
@@ -76,8 +71,8 @@ export function RepositoryDetailPage() {
     <nav className="subnav" aria-label="Repository sections">
       {Object.entries(tabs).map(([path, label]) => <NavLink key={path} to={base + '/' + path}>{label}</NavLink>)}
     </nav>
-    {tab === 'files' && !hash ? <RepositoryFiles key={repo.id} preview={preview} />
-      : tab === 'commits' && !extra ? <RepositoryCommits key={repo.id} preview={preview} hash={hash} />
+    {tab === 'files' && !hash ? <RepositoryFiles key={repo.id} repo={repo} />
+      : tab === 'commits' && !extra ? <RepositoryCommits key={repo.id} repo={repo} hash={hash} />
       : tab === 'snapshots' && !hash ? <Snapshots key={repo.id} repo={repo} />
       : tab === 'settings' && !hash ? <RepositorySettings key={repo.id} repo={repo} />
       : <p className="rule-message">Choose a repository section above.</p>}

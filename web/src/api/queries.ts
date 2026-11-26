@@ -3,7 +3,7 @@ import { ApiError } from './client'
 import { useConnection } from './ConnectionProvider'
 import type { ApiConnection } from './connection'
 import * as endpoints from './endpoints'
-import type { Job, Project, Repository, SyncPolicy } from '@/types/domain'
+import type { Job, Project, Repository, SourceFile, SyncPolicy } from '@/types/domain'
 
 const key = (api: ApiConnection) => [api.apiBaseUrl, api.revision] as const
 const projectsKey = (api: ApiConnection) => [...key(api), 'projects'] as const
@@ -102,11 +102,21 @@ export function useDeleteProject() {
   })
 }
 
-export function useRepositories(id: string, filters: endpoints.RepositoryFilters) {
+export function useRepositories(id: string, filters: endpoints.RepositoryFilters, allPages = false) {
   const { connection: api } = useConnection()
   return useQuery({
-    queryKey: [...repositoriesKey(api, id), filters],
-    queryFn: ({ signal }) => endpoints.listRepositories(api, id, filters, signal),
+    queryKey: [...repositoriesKey(api, id), filters, allPages],
+    async queryFn({ signal }) {
+      const first = await endpoints.listRepositories(api, id, filters, signal)
+      if (!allPages) return first
+      const items = [...first.items]
+      let page = first
+      while (page.items.length && page.offset + page.items.length < page.total) {
+        page = await endpoints.listRepositories(api, id, { ...filters, offset: page.offset + page.items.length }, signal)
+        items.push(...page.items)
+      }
+      return { ...first, items }
+    },
   })
 }
 
@@ -185,11 +195,138 @@ export function useSnapshots(id: string, repoId: string, filters: endpoints.Page
     queryKey: [...queryKey, 'snapshots', filters],
     queryFn: ({ signal }) => endpoints.listSnapshots(api, id, repoId, filters, signal),
   })
-  const active = useQuery({
-    queryKey: [...queryKey, 'active-snapshot'],
+  const active = useActiveSnapshot(id, repoId)
+  return { snapshots, active }
+}
+
+export function useActiveSnapshot(id: string, repoId: string, enabled = true) {
+  const { connection: api } = useConnection()
+  return useQuery({
+    queryKey: [...repositoryKey(api, id, repoId), 'active-snapshot'], enabled,
     queryFn: ({ signal }) => endpoints.getActiveSnapshot(api, id, repoId, signal),
   })
-  return { snapshots, active }
+}
+
+export function useFileTree(id: string, repoId: string, sha: string, filters: endpoints.ActiveFileFilters) {
+  const { connection: api } = useConnection()
+  return useQuery<endpoints.Page<{ path: string }>>({
+    queryKey: [...repositoryKey(api, id, repoId), 'file-tree', sha, filters],
+    queryFn: ({ signal }) => sha
+      ? endpoints.listHistoricalTree(api, id, repoId, sha, filters, signal)
+      : endpoints.listActiveFiles(api, id, repoId, filters, signal),
+  })
+}
+
+export function useFileContent(id: string, repoId: string, sha: string, path: string) {
+  const { connection: api } = useConnection()
+  return useQuery<endpoints.HistoricalFile | (SourceFile & { binary?: boolean })>({
+    queryKey: [...repositoryKey(api, id, repoId), 'file-content', sha, path], enabled: Boolean(path),
+    queryFn: ({ signal }) => sha
+      ? endpoints.getHistoricalFile(api, id, repoId, sha, path, signal)
+      : endpoints.getActiveFileContent(api, id, repoId, path, signal),
+  })
+}
+
+export function useRepositoryRefs(id: string, repoId: string, filters: endpoints.RefFilters) {
+  const { connection: api } = useConnection()
+  return useQuery({
+    queryKey: [...repositoryKey(api, id, repoId), 'refs', filters],
+    enabled: Boolean(repoId),
+    queryFn: ({ signal }) => endpoints.listRepositoryRefs(api, id, repoId, filters, signal),
+  })
+}
+
+export function useFileHistory(id: string, repoId: string, filters: endpoints.FileHistoryFilters) {
+  const { connection: api } = useConnection()
+  return useQuery({
+    queryKey: [...repositoryKey(api, id, repoId), 'file-history', filters],
+    queryFn: ({ signal }) => endpoints.listFileHistory(api, id, repoId, filters, signal),
+  })
+}
+
+export function useFileBlame(id: string, repoId: string, filters: endpoints.BlameFilters) {
+  const { connection: api } = useConnection()
+  return useQuery({
+    queryKey: [...repositoryKey(api, id, repoId), 'file-blame', filters],
+    queryFn: ({ signal }) => endpoints.getFileBlame(api, id, repoId, filters, signal),
+  })
+}
+
+export function useCommits(id: string, repoId: string, filters: endpoints.CommitFilters) {
+  const { connection: api } = useConnection()
+  return useQuery({
+    queryKey: [...repositoryKey(api, id, repoId), 'commits', filters], enabled: Boolean(repoId),
+    queryFn: async ({ signal }) => {
+      try {
+        return await endpoints.listCommits(api, id, repoId, filters, signal)
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 404) return null
+        throw error
+      }
+    },
+  })
+}
+
+export function useCommit(id: string, repoId: string, sha: string, filters: endpoints.PageParams) {
+  const { connection: api } = useConnection()
+  const root = [...repositoryKey(api, id, repoId), 'commit', sha]
+  const detail = useQuery({
+    queryKey: root,
+    queryFn: ({ signal }) => endpoints.getCommit(api, id, repoId, sha, signal),
+  })
+  const files = useQuery({
+    queryKey: [...root, 'files', filters],
+    queryFn: ({ signal }) => endpoints.listCommitFiles(api, id, repoId, sha, filters, signal),
+  })
+  return { detail, files }
+}
+
+export function useCompareCommits(id: string, repoId: string, filters: endpoints.CompareFilters) {
+  const { connection: api } = useConnection()
+  return useQuery({
+    queryKey: [...repositoryKey(api, id, repoId), 'compare', filters],
+    queryFn: ({ signal }) => endpoints.compareCommits(api, id, repoId, filters, signal),
+  })
+}
+
+type DiscussionKind = 'issue' | 'pull'
+const activityKey = (api: ApiConnection, id: string) => [...projectKey(api, id), 'activity'] as const
+
+export function useActivity(id: string, repoId: string, kind: DiscussionKind, filters: endpoints.PageParams) {
+  const { connection: api } = useConnection()
+  return useQuery({
+    queryKey: [...activityKey(api, id), kind, repoId, 'list', filters],
+    queryFn: ({ signal }) => {
+      if (kind === 'issue') return repoId
+        ? endpoints.listRepositoryIssues(api, id, repoId, filters, signal)
+        : endpoints.listProjectIssues(api, id, filters, signal)
+      return repoId
+        ? endpoints.listRepositoryPulls(api, id, repoId, filters, signal)
+        : endpoints.listProjectPulls(api, id, filters, signal)
+    },
+  })
+}
+
+export function useDiscussion(id: string, repoId: string, kind: DiscussionKind, number: number, filters: endpoints.PageParams) {
+  const { connection: api } = useConnection()
+  const root = [...activityKey(api, id), kind, repoId, number]
+  const detail = useQuery({
+    queryKey: root,
+    queryFn: ({ signal }) => (kind === 'issue' ? endpoints.getIssueDetail : endpoints.getPullDetail)(api, id, repoId, number, signal),
+  })
+  const comments = useQuery({
+    queryKey: [...root, 'comments', filters],
+    queryFn: ({ signal }) => (kind === 'issue' ? endpoints.listIssueComments : endpoints.listPullComments)(api, id, repoId, number, filters, signal),
+  })
+  return { detail, comments }
+}
+
+export function usePullCommits(id: string, repoId: string, number: number, filters: endpoints.PageParams) {
+  const { connection: api } = useConnection()
+  return useQuery({
+    queryKey: [...activityKey(api, id), 'pull', repoId, number, 'commits', filters],
+    queryFn: ({ signal }) => endpoints.listPullCommits(api, id, repoId, number, filters, signal),
+  })
 }
 
 export function useDocuments(id: string, filters: endpoints.DocumentFilters) {
@@ -262,13 +399,16 @@ export function useEnqueueSync(id: string, repoId: string, kind: SyncPolicy['kin
   const client = useQueryClient()
   const mutation = useMutation({
     mutationKey: [...repositoryKey(api, id, repoId), 'enqueue', kind],
-    mutationFn: () => enqueue[kind](api, id, repoId),
+    mutationFn: (ref?: string | void) => enqueue[kind](api, id, repoId, ref || undefined),
     onSuccess: () => { void client.invalidateQueries({ queryKey: jobsKey(api) }) },
   })
-  function refreshOnSettled() {
+  function refreshOnSettled(job?: Job) {
     void client.invalidateQueries({ queryKey: repositoryKey(api, id, repoId) })
     void client.invalidateQueries({ queryKey: repositoriesKey(api, id) })
     void client.invalidateQueries({ queryKey: recentJobsKey(api) })
+    if (kind === 'github_activity' && job?.status === 'succeeded') {
+      void client.invalidateQueries({ queryKey: activityKey(api, id) })
+    }
   }
   return { mutation, receipt: mutation.data, refreshOnSettled }
 }
